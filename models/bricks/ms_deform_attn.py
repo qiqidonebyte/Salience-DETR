@@ -1,83 +1,17 @@
 import math
-import os
 import warnings
 
 import torch
 import torchvision
 from torch import Tensor, nn
-from torch.autograd import Function
-from torch.autograd.function import once_differentiable
 from torch.nn import functional as F
 from torch.nn.init import constant_, xavier_uniform_
-from torch.utils.cpp_extension import load
-
-if torch.cuda.is_available():
-    _C = load(
-        "MultiScaleDeformableAttention",
-        sources=[f"{os.path.dirname(__file__)}/ops/cuda/ms_deform_attn_cuda.cu"],
-        extra_cflags=["-O2"],
-        verbose=True,
-    )
-else:
-    warnings.warn("No cuda is available, skip loading MultiScaleDeformableAttention C++ extention")
 
 
 def _is_power_of_2(n):
     if (not isinstance(n, int)) or (n < 0):
         raise ValueError("invalid input for _is_power_of_2: {} (type: {})".format(n, type(n)))
     return (n & (n - 1) == 0) and n != 0
-
-
-class MultiScaleDeformableAttnFunction(Function):
-    @staticmethod
-    def forward(
-        ctx,
-        value,
-        value_spatial_shapes,
-        value_level_start_index,
-        sampling_locations,
-        attention_weights,
-        im2col_step,
-    ):
-        ctx.im2col_step = im2col_step
-        output = _C.ms_deform_attn_forward(
-            value,
-            value_spatial_shapes,
-            value_level_start_index,
-            sampling_locations,
-            attention_weights,
-            ctx.im2col_step,
-        )
-        ctx.save_for_backward(
-            value,
-            value_spatial_shapes,
-            value_level_start_index,
-            sampling_locations,
-            attention_weights,
-        )
-        return output
-
-    @staticmethod
-    @once_differentiable
-    def backward(ctx, grad_output):
-        (
-            value,
-            value_spatial_shapes,
-            value_level_start_index,
-            sampling_locations,
-            attention_weights,
-        ) = ctx.saved_tensors
-        grad_value, grad_sampling_loc, grad_attn_weight = _C.ms_deform_attn_backward(
-            value,
-            value_spatial_shapes,
-            value_level_start_index,
-            sampling_locations,
-            attention_weights,
-            grad_output,
-            ctx.im2col_step,
-        )
-
-        return grad_value, None, None, grad_sampling_loc, grad_attn_weight, None
 
 
 def bilinear_grid_sample(im, grid, align_corners=False):
@@ -153,10 +87,10 @@ def bilinear_grid_sample(im, grid, align_corners=False):
 
 
 def multi_scale_deformable_attn_pytorch(
-    value: torch.Tensor,
-    value_spatial_shapes: torch.Tensor,
-    sampling_locations: torch.Tensor,
-    attention_weights: torch.Tensor,
+        value: torch.Tensor,
+        value_spatial_shapes: torch.Tensor,
+        sampling_locations: torch.Tensor,
+        attention_weights: torch.Tensor,
 ) -> torch.Tensor:
     bs, _, num_heads, embed_dims = value.shape
     _, num_queries, num_heads, num_levels, num_points, _ = sampling_locations.shape
@@ -215,12 +149,12 @@ class MultiScaleDeformableAttention(nn.Module):
     <https://arxiv.org/pdf/2010.04159.pdf>`_.
     """
     def __init__(
-        self,
-        embed_dim: int = 256,
-        num_levels: int = 4,
-        num_heads: int = 8,
-        num_points: int = 4,
-        img2col_step: int = 64,
+            self,
+            embed_dim: int = 256,
+            num_levels: int = 4,
+            num_heads: int = 8,
+            num_points: int = 4,
+            img2col_step: int = 64,
     ):
         """Initialization function of MultiScaleDeformableAttention
 
@@ -234,7 +168,9 @@ class MultiScaleDeformableAttention(nn.Module):
         super().__init__()
         if embed_dim % num_heads != 0:
             raise ValueError(
-                "embed_dim must be divisible by num_heads, but got {} and {}".format(embed_dim, num_heads)
+                "embed_dim must be divisible by num_heads, but got {} and {}".format(
+                    embed_dim, num_heads
+                )
             )
         head_dim = embed_dim // num_heads
 
@@ -280,13 +216,13 @@ class MultiScaleDeformableAttention(nn.Module):
         constant_(self.output_proj.bias.data, 0.0)
 
     def forward(
-        self,
-        query: Tensor,
-        reference_points: Tensor,
-        value: Tensor,
-        spatial_shapes: Tensor,
-        level_start_index: Tensor,
-        key_padding_mask: Tensor,
+            self,
+            query: Tensor,
+            reference_points: Tensor,
+            value: Tensor,
+            spatial_shapes: Tensor,
+            level_start_index: Tensor,
+            key_padding_mask: Tensor,
     ) -> Tensor:
         """Forward function of MultiScaleDeformableAttention
 
@@ -335,13 +271,13 @@ class MultiScaleDeformableAttention(nn.Module):
         if reference_points.shape[-1] == 2:
             offset_normalizer = torch.stack([spatial_shapes[..., 1], spatial_shapes[..., 0]], -1)
             sampling_locations = (
-                reference_points[:, :, None, :, None, :] +
-                sampling_offsets / offset_normalizer[None, None, None, :, None, :]
+                    reference_points[:, :, None, :, None, :] +
+                    sampling_offsets / offset_normalizer[None, None, None, :, None, :]
             )
         elif reference_points.shape[-1] == 4:
             sampling_locations = (
-                reference_points[:, :, None, :, None, :2] +
-                sampling_offsets / self.num_points * reference_points[:, :, None, :, None, 2:] * 0.5
+                    reference_points[:, :, None, :, None, :2] + sampling_offsets / self.num_points *
+                    reference_points[:, :, None, :, None, 2:] * 0.5
             )
         else:
             raise ValueError(
@@ -351,19 +287,9 @@ class MultiScaleDeformableAttention(nn.Module):
             )
 
         # the original impl for fp32 training
-        if torch.cuda.is_available() and value.is_cuda:
-            output = MultiScaleDeformableAttnFunction.apply(
-                value.to(torch.float32),
-                spatial_shapes,
-                level_start_index,
-                sampling_locations,
-                attention_weights,
-                self.im2col_step,
-            )
-        else:
-            output = multi_scale_deformable_attn_pytorch(
-                value, spatial_shapes, sampling_locations, attention_weights
-            )
+        output = multi_scale_deformable_attn_pytorch(
+            value, spatial_shapes, sampling_locations, attention_weights
+        )
 
         if value.dtype != torch.float32:
             output = output.to(value.dtype)
