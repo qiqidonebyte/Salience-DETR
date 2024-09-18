@@ -1,5 +1,6 @@
 import copy
 import os
+from functools import partial
 from typing import List, Tuple, Union
 
 import cv2
@@ -96,15 +97,22 @@ def plot_bounding_boxes_on_image_cv2(
     if len(labels) == 0:
         return image
 
+    # convert to numpy array if given list as input
+    if any(not isinstance(t, np.ndarray) for t in (boxes, labels)):
+        boxes, labels = map(np.array, (boxes, labels))
+    if scores is not None and not isinstance(scores, np.ndarray):
+        scores = np.array(scores)
+    boxes = boxes.astype(np.int32)  # convert to int32, compatible with cv2
+
+    # check input format for boxes, labels, class and scores
     assert len(boxes) == len(labels), "The number of boxes and labels must be equal"
+    assert boxes.shape[-1] == 4, "Boxes must have 4 elements (x1, y1, x2, y2) and x2 > x1, y2 > y1"
     assert classes is None or max(labels) <= len(classes) - 1, "#classes less than label index"
+    assert scores is None or len(scores) == len(labels), "#scores and #labels must be equal"
 
     # filter low confident predictions
     if scores is not None:
-        keep = [s > show_conf for s in scores]
-        boxes = [b for b, k in zip(boxes, keep) if k == True]
-        labels = [l for l, k in zip(labels, keep) if k == True]
-        scores = [s for s, k in zip(scores, keep) if k == True]
+        boxes, labels, scores = map(lambda x: x[scores > show_conf], (boxes, labels, scores))
 
     image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
 
@@ -123,7 +131,6 @@ def plot_bounding_boxes_on_image_cv2(
     labels = [classes[i] for i in labels]
 
     # draw bounding boxes filling
-    boxes = np.array(boxes, dtype=np.int32)
     original_image = copy.deepcopy(image)
     image = copy.deepcopy(image)
     for box, color in zip(boxes, colors):
@@ -214,26 +221,54 @@ def visualize_coco_bounding_boxes(
     cat_ids = list(range(max(dataset.coco.cats.keys()) + 1))
     classes = tuple(dataset.coco.cats.get(c, {"name": "none"})["name"] for c in cat_ids)
 
-    def visualize_single_in_coco(image, output):
-        # plot bounding boxes on image
-        image = image.numpy().transpose(1, 2, 0)
-        image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
-        image = plot_bounding_boxes_on_image_cv2(
-            image=image,
-            boxes=output["boxes"],
-            labels=output["labels"],
-            scores=output.get("scores", None),
-            classes=classes,
-            show_conf=show_conf,
-            font_scale=font_scale,
-            box_thick=box_thick,
-            fill_alpha=fill_alpha,
-            text_box_color=text_box_color,
-            text_font_color=text_font_color,
-            text_alpha=text_alpha,
-        )
-        image_name = dataset.coco.loadImgs([output["image_id"]])[0]["file_name"]
-        cv2.imwrite(os.path.join(show_dir, os.path.basename(image_name)), image)
-
-    data_loader.collate_fn = lambda x: visualize_single_in_coco(*x[0])
+    # multi-process on Windows does not support pickle local functions
+    # we use functools.partial on global functools to workaround it
+    data_loader.collate_fn = partial(
+        _visualize_batch_in_coco,
+        classes=classes,
+        show_conf=show_conf,
+        font_scale=font_scale,
+        box_thick=box_thick,
+        fill_alpha=fill_alpha,
+        text_box_color=text_box_color,
+        text_font_color=text_font_color,
+        text_alpha=text_alpha,
+        dataset=dataset,
+        show_dir=show_dir,
+    )
     [None for _ in tqdm(data_loader)]
+
+
+def _visualize_batch_in_coco(
+    batch: Tuple[np.ndarray, dict],
+    dataset: CocoDetection,
+    classes: List[str],
+    show_conf: float = 0.0,
+    show_dir: str = None,
+    font_scale: float = 1.0,
+    box_thick: int = 3,
+    fill_alpha: float = 0.2,
+    text_box_color: Tuple[int] = (255, 255, 255),
+    text_font_color: Tuple[int] = None,
+    text_alpha: float = 0.5,
+):
+    image, output = batch[0]
+    # plot bounding boxes on image
+    image = image.numpy().transpose(1, 2, 0)
+    image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+    image = plot_bounding_boxes_on_image_cv2(
+        image=image,
+        boxes=output["boxes"],
+        labels=output["labels"],
+        scores=output.get("scores", None),
+        classes=classes,
+        show_conf=show_conf,
+        font_scale=font_scale,
+        box_thick=box_thick,
+        fill_alpha=fill_alpha,
+        text_box_color=text_box_color,
+        text_font_color=text_font_color,
+        text_alpha=text_alpha,
+    )
+    image_name = dataset.coco.loadImgs([output["image_id"]])[0]["file_name"]
+    cv2.imwrite(os.path.join(show_dir, os.path.basename(image_name)), image)
