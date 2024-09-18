@@ -36,7 +36,8 @@ backbone = ResNetBackbone(
 )
 
 neck = ChannelMapper(
-    in_channels=backbone.num_channels,
+    # in_channels=backbone.num_channels,
+    in_channels=[embed_dim,embed_dim,embed_dim],
     out_channels=embed_dim,
     num_outs=num_feature_levels,
 )

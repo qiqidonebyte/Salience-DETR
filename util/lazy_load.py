@@ -15,14 +15,14 @@ except ImportError:
 
 
 class Config:
-    def __init__(self, file_path, name_space={}, partials=()):
+    def __init__(self, file_path, name_space={}, partials=()): # 构造函数接受三个参数，file_path 是配置文件的路径，name_space 是一个字典，用于存储执行代码后的变量，partials 是一个元组，包含要优化的函数调用。
         self.partials = partials
-        with open(file_path, "r") as f:
+        with open(file_path, "r") as f: # 打开并读取配置文件。
             code = f.read()
-        if len(partials) != 0:
+        if len(partials) != 0: # 如果 partials 不为空，调用 self.partial_optim(code) 方法来修改代码，以便使用 functools.partial 来优化部分函数调用。
             code = self.partial_optim(code)
-        exec(code, name_space)
-        self.__dict__ = {k: v for k, v in name_space.items() if k != "__builtins__"}
+        exec(code, name_space) # 使用 exec(code, name_space) 执行配置文件中的代码。代码执行后，name_space 字典将包含代码中定义的所有变量。
+        self.__dict__ = {k: v for k, v in name_space.items() if k != "__builtins__"} # 通过执行 self.__dict__ = {k: v for k, v in name_space.items() if k != "__builtins__"}，将 name_space 中的变量更新到类的实例变量中。
 
     def partial_optim(self, code):
         tree = ast.parse(code)

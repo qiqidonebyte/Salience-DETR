@@ -1,3 +1,10 @@
+def reconstruction_loss(pred_boxes, noised_boxes, small_target_mask):
+    loss = F.l1_loss(pred_boxes, noised_boxes, reduction='none')
+    # 对小目标使用更大的权重
+    loss[small_target_mask] *= 2  # 举例：权重乘以2
+    return loss.mean()
+
+
 import contextlib
 import datetime
 import io
@@ -109,7 +116,18 @@ def evaluate_acc(model, data_loader, epoch, accelerator=None):
 
     # for collect detection numbers
     category_det_nums = [0] * (max(coco.getCatIds()) + 1)
+
+    # 假设我们有一个函数来计算预测和真实标签之间的损失
+    def compute_loss_for_batch(prediction, target):
+        # 这里只是一个示例，你需要根据你的模型输出和目标来实现损失计算
+        loss_value = torch.nn.functional.cross_entropy(prediction, target)
+        return loss_value
+
+    batch_index = 0
     for images, targets in metric_logger.log_every(data_loader, 10, header):
+        # 更新批次索引
+        batch_index += 1
+
         # get model predictions
         model_time = time.time()
         outputs = model(images)
@@ -117,6 +135,10 @@ def evaluate_acc(model, data_loader, epoch, accelerator=None):
         outputs = [{k: v.to("cpu") for k, v in t.items()} for t in outputs]
         model_time = time.time() - model_time
 
+        # # 计算当前批次的损失
+        # loss = compute_loss_for_batch(outputs, targets)
+        # # 记录损失到日志
+        # logger.info(f"Epoch: {epoch}, Batch: {batch_index}, Loss: {loss.item()}")
         # perform evaluation through COCO API
         res = {target["image_id"]: output for target, output in zip(targets, outputs)}
         evaluator_time = time.time()
@@ -180,7 +202,7 @@ def evaluate_acc(model, data_loader, epoch, accelerator=None):
     return coco_evaluator
 
 
-def get_logging_string(metric_logger, data_loader, i, epoch):
+def get_logging_string2(metric_logger, data_loader, i, epoch):
     MB = 1024 * 1024
     eta_seconds = metric_logger.meters["iter_time"].global_avg * (len(data_loader) - i)
     eta_string = str(datetime.timedelta(seconds=int(eta_seconds)))
@@ -188,5 +210,12 @@ def get_logging_string(metric_logger, data_loader, i, epoch):
     max_memory = torch.cuda.max_memory_allocated() / MB
 
     log_msg = f"Epoch: [{epoch}]  [{i}/{len(data_loader)}]  eta: {eta_string}  "
-    log_msg += f"{str(metric_logger)}  mem: {memory:.0f}  max mem: {max_memory:.0f}"
+    # log_msg += f"{str(metric_logger)}  mem: {memory:.0f}  max mem: {max_memory:.0f}"
+    return log_msg
+
+def get_logging_string(metric_logger, data_loader, i, epoch):
+    log_msg = f"Time: {datetime.datetime.now()}  "
+    log_msg += f"Epoch: {epoch}  "
+    log_msg += f"Iter {i}/{len(data_loader)}  "
+    log_msg += f"Loss: {metric_logger.meters['loss'].global_avg:.4f}"
     return log_msg

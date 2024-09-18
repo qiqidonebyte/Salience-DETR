@@ -1,6 +1,8 @@
 from torch import nn
+# from torchvision.ops import FrozenBatchNorm2d
 
-from models.backbones.swin import SwinTransformerBackbone
+from models.backbones.resnet import ResNetBackbone
+from models.bricks.misc import FrozenBatchNorm2d
 from models.bricks.position_encoding import PositionEmbeddingSine
 from models.bricks.post_process import PostProcess
 from models.bricks.salience_transformer import (
@@ -20,16 +22,18 @@ from models.necks.repnet import RepVGGPluXNetwork
 embed_dim = 256
 num_classes = 91
 num_queries = 900
-num_feature_levels = 4
-transformer_enc_layers = 6
-transformer_dec_layers = 6
+num_feature_levels = 8
+transformer_enc_layers = 8
+transformer_dec_layers = 8
 num_heads = 8
 dim_feedforward = 2048
 
 # instantiate model components
-position_embedding = PositionEmbeddingSine(embed_dim // 2, temperature=10000, normalize=True, offset=-0.5)
+position_embedding = PositionEmbeddingSine(embed_dim // 2, temperature=20000, normalize=True, offset=-0.5)
 
-backbone = SwinTransformerBackbone("swin_l", return_indices=(1, 2, 3), freeze_indices=(0,))
+backbone = ResNetBackbone(
+    "resnet50", norm_layer=FrozenBatchNorm2d, return_indices=(1, 2, 3), freeze_indices=(0,)
+)
 
 neck = ChannelMapper(
     # in_channels=backbone.num_channels,
@@ -80,7 +84,7 @@ transformer = SalienceTransformer(
 
 matcher = HungarianMatcher(cost_class=2, cost_bbox=5, cost_giou=2)
 
-weight_dict = {"loss_class": 1, "loss_bbox": 5, "loss_giou": 2}
+weight_dict = {"loss_class": 2, "loss_bbox": 8, "loss_giou": 4}
 weight_dict.update({"loss_class_dn": 1, "loss_bbox_dn": 5, "loss_giou_dn": 2})
 weight_dict.update({
     k + f"_{i}": v
@@ -92,7 +96,7 @@ weight_dict.update({"loss_salience": 2})
 
 criterion = HybridSetCriterion(num_classes, matcher=matcher, weight_dict=weight_dict, alpha=0.25, gamma=2.0)
 foreground_criterion = SalienceCriterion(noise_scale=0.0, alpha=0.25, gamma=2.0)
-postprocessor = PostProcess(select_box_nums_for_evaluation=300)
+postprocessor = PostProcess(select_box_nums_for_evaluation=500)
 
 # combine above components to instantiate the model
 model = SalienceDETR(

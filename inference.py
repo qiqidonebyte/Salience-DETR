@@ -93,7 +93,7 @@ def inference():
     )
 
     # get inference results from model output
-    model = Config(args.model_config).model.eval()
+    model = Config(args.model_config).model.eval()  # eval() 是 Python 中的一个内置函数，它允许你执行一个字符串表达式，并返回表达式的值。
     checkpoint = load_checkpoint(args.checkpoint)
     if isinstance(checkpoint, Dict) and "model" in checkpoint:
         checkpoint = checkpoint["model"]
