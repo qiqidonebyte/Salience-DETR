@@ -23,7 +23,7 @@ class MSRCREnhanced(nn.Module):
         # 注意：可分离卷积在数学上完全等价于2D卷积，不会损失精度
         # 因为高斯核可以分解为 G(x,y) = G(x) * G(y)
         self.gaussian_kernels_1d = nn.ParameterList([
-            self._create_gaussian_kernel_1d(s) for s in scales
+            nn.Parameter(self._create_gaussian_kernel_1d(s), requires_grad=False) for s in scales
         ])
         
         # 为了兼容性，也保留2D核（但只在use_separable=False时使用）
@@ -41,8 +41,6 @@ class MSRCREnhanced(nn.Module):
         x = torch.arange(kernel_size, dtype=torch.float32) - kernel_size // 2
         kernel_1d = torch.exp(-x**2 / (2 * sigma**2))
         kernel_1d = kernel_1d / kernel_1d.sum()
-        # 形状: [3, 1, 1, kernel_size] 用于水平卷积
-        # 形状: [3, 1, kernel_size, 1] 用于垂直卷积
         return kernel_1d
     
     def _create_gaussian_kernel_2d(self, sigma):
@@ -52,6 +50,17 @@ class MSRCREnhanced(nn.Module):
         kernel = kernel_2d[None, None, ...].repeat(3, 1, 1, 1)
         return kernel
     
+    def _kernel_to_conv_weight(self, kernel_1d, channels, horizontal=True):
+        """
+        将1D核扩展成conv2d可用的权重张量，形状: [channels, 1, k, 1] 或 [channels, 1, 1, k]
+        """
+        if horizontal:
+            kernel = kernel_1d.view(1, 1, 1, -1)
+        else:
+            kernel = kernel_1d.view(1, 1, -1, 1)
+        kernel = kernel.repeat(channels, 1, 1, 1)
+        return kernel
+
     def _gaussian_blur_separable(self, x, kernel_1d, sigma):
         """
         使用可分离卷积进行高斯模糊
@@ -84,28 +93,32 @@ class MSRCREnhanced(nn.Module):
             x_kernel = torch.arange(kernel_size_down, dtype=torch.float32, device=x.device) - kernel_size_down // 2
             kernel_1d_down = torch.exp(-x_kernel**2 / (2 * (sigma / scale_factor)**2))
             kernel_1d_down = kernel_1d_down / kernel_1d_down.sum()
-            kernel_1d_down = kernel_1d_down.view(1, 1, 1, -1)
+            kernel_1d_down = kernel_1d_down.to(x.device)
             
             # 水平卷积
             padding_h = kernel_size_down // 2
-            blurred_h = F.conv2d(x_down, kernel_1d_down, padding=(0, padding_h), groups=C)
+            h_kernel = self._kernel_to_conv_weight(kernel_1d_down, C, horizontal=True)
+            blurred_h = F.conv2d(x_down, h_kernel, padding=(0, padding_h), groups=C)
             # 垂直卷积
             blurred_h = blurred_h.transpose(2, 3)
-            blurred = F.conv2d(blurred_h, kernel_1d_down, padding=(0, padding_h), groups=C)
+            v_kernel = self._kernel_to_conv_weight(kernel_1d_down, C, horizontal=False)
+            blurred = F.conv2d(blurred_h, v_kernel, padding=(0, padding_h), groups=C)
             blurred = blurred.transpose(2, 3)
             
             # 上采样回原始尺寸
             blurred = F.interpolate(blurred, size=(H, W), mode='bilinear', align_corners=False)
         else:
             # 标准可分离卷积
-            kernel_1d = kernel_1d.view(1, 1, 1, -1).to(x.device)
-            padding = kernel_1d.shape[-1] // 2
+            kernel_1d = kernel_1d.to(x.device)
+            padding = kernel_1d.shape[0] // 2
             
             # 水平卷积: [B, C, H, W] -> [B, C, H, W]
-            blurred = F.conv2d(x, kernel_1d, padding=(0, padding), groups=C)
+            h_kernel = self._kernel_to_conv_weight(kernel_1d, C, horizontal=True)
+            blurred = F.conv2d(x, h_kernel, padding=(0, padding), groups=C)
             # 垂直卷积: 需要转置
             blurred = blurred.transpose(2, 3)  # [B, C, W, H]
-            blurred = F.conv2d(blurred, kernel_1d, padding=(0, padding), groups=C)
+            v_kernel = self._kernel_to_conv_weight(kernel_1d, C, horizontal=False)
+            blurred = F.conv2d(blurred, v_kernel, padding=(0, padding), groups=C)
             blurred = blurred.transpose(2, 3)  # [B, C, H, W]
         
         return blurred
