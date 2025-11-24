@@ -99,11 +99,8 @@ class MSRCREnhanced(nn.Module):
             padding_h = kernel_size_down // 2
             h_kernel = self._kernel_to_conv_weight(kernel_1d_down, C, horizontal=True)
             blurred_h = F.conv2d(x_down, h_kernel, padding=(0, padding_h), groups=C)
-            # 垂直卷积
-            blurred_h = blurred_h.transpose(2, 3)
             v_kernel = self._kernel_to_conv_weight(kernel_1d_down, C, horizontal=False)
-            blurred = F.conv2d(blurred_h, v_kernel, padding=(0, padding_h), groups=C)
-            blurred = blurred.transpose(2, 3)
+            blurred = F.conv2d(blurred_h, v_kernel, padding=(padding_h, 0), groups=C)
             
             # 上采样回原始尺寸
             blurred = F.interpolate(blurred, size=(H, W), mode='bilinear', align_corners=False)
@@ -115,11 +112,8 @@ class MSRCREnhanced(nn.Module):
             # 水平卷积: [B, C, H, W] -> [B, C, H, W]
             h_kernel = self._kernel_to_conv_weight(kernel_1d, C, horizontal=True)
             blurred = F.conv2d(x, h_kernel, padding=(0, padding), groups=C)
-            # 垂直卷积: 需要转置
-            blurred = blurred.transpose(2, 3)  # [B, C, W, H]
             v_kernel = self._kernel_to_conv_weight(kernel_1d, C, horizontal=False)
-            blurred = F.conv2d(blurred, v_kernel, padding=(0, padding), groups=C)
-            blurred = blurred.transpose(2, 3)  # [B, C, H, W]
+            blurred = F.conv2d(blurred, v_kernel, padding=(padding, 0), groups=C)
         
         return blurred
 
