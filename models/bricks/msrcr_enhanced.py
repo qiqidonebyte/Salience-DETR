@@ -2,23 +2,89 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-# 1. 物理光学增强模块 (MSRCR简化版) - 性能优化版本（精度无损）
+# ============================================================================
+# 物理感知引导注意力网络 (Physics-Aware Guided Attention Network, PAGAN)
+# ============================================================================
+# 
+# 核心思想：
+#   本模块作为主干网络的轻量级并行旁路，基于Retinex物理模型生成"注意力图"，
+#   告诉主网络"应该更关注原始图像的哪些区域"（如被薄雾遮挡、低可见度的区域）。
+#
+# 理论支撑：
+#   Retinex理论假设图像 I(x,y) = R(x,y) * L(x,y)
+#   - R：反射分量（物体固有属性，不受天气影响）
+#   - L：光照分量（受雾、恶劣光照等天气因素影响）
+#   
+#   在极端天气下，L 被污染，导致目标难以识别。本模块通过多尺度Retinex分解，
+#   估计哪些区域受到天气影响较大（需要更多关注），生成物理感知的注意力图。
+#
+# 创新点：
+#   1. 物理可解释：基于Retinex理论，不是黑盒注意力
+#   2. 自适应强度：根据图像质量（雾浓度等）自动调整注意力强度
+#   3. 轻量高效：作为旁路分支，不增加主干网络负担
+#   4. 即插即用：可与任何检测器Backbone并行使用
+#
+# ============================================================================
+
 class MSRCREnhanced(nn.Module):
-    def __init__(self, scales=[15, 80, 250], weights=[1.0, 1.0, 1.0], use_separable=True, downsample_threshold=float('inf')):
+    """
+    物理感知引导注意力模块 (Physics-Aware Guided Attention Module)
+    
+    输入：原始图像 [B, 3, H, W]，值域 [0, 1]
+    输出：注意力图 [B, 1, H, W]，表示每个像素需要被关注的程度
+    
+    注意力图的含义：
+    - 高值区域：受天气影响较大，需要主网络更多关注（如被雾遮挡的目标）
+    - 低值区域：图像质量较好，正常处理即可
+    """
+    
+    def __init__(self, scales=[15, 80, 250], weights=[1.0, 1.0, 1.0], use_separable=True, 
+                 downsample_threshold=float('inf'), adaptive_strength=True):
         """
         Args:
-            scales: 多尺度高斯核的尺度参数
-            weights: 各尺度的权重
-            use_separable: 是否使用可分离卷积（默认True，数学上等价于2D卷积，无精度损失，但速度快很多）
-            downsample_threshold: 当sigma大于此值时，使用下采样加速（默认inf，即禁用下采样以保证精度）
-                                 如果追求速度可以设置为100，但会损失一些精度
+            scales: 多尺度高斯核的尺度参数，用于捕获不同尺度的光照/雾霾变化
+                   - 小尺度(15)：捕获局部细节的退化
+                   - 中尺度(80)：捕获中等范围的雾霾
+                   - 大尺度(250)：捕获全局光照变化
+            weights: 各尺度的权重，控制不同尺度的贡献
+            use_separable: 是否使用可分离卷积（计算效率优化，精度无损）
+            downsample_threshold: 大尺度高斯模糊的加速阈值
+            adaptive_strength: 是否启用自适应注意力强度（根据图像质量调整）
         """
         super().__init__()
         self.scales = scales
         self.weights = nn.Parameter(torch.tensor(weights).view(1, -1, 1, 1), requires_grad=False)
         self.use_separable = use_separable
         self.downsample_threshold = downsample_threshold
+        self.adaptive_strength = adaptive_strength
         
+        # ========== 自适应强度估计器 ==========
+        # 功能：估计图像质量，决定注意力图的强度
+        # 原理：极端天气图像通常具有低对比度、高亮度方差等特征
+        # 输出：强度系数 [0, 1]，越高表示天气越恶劣，注意力越强
+        if adaptive_strength:
+            self.degradation_estimator = nn.Sequential(
+                nn.AdaptiveAvgPool2d(1),  # 全局特征
+                nn.Flatten(),
+                nn.Linear(3, 16),
+                nn.ReLU(),
+                nn.Linear(16, 1),
+                nn.Sigmoid()
+            )
+        
+        # ========== 物理感知注意力生成器 ==========
+        # 输入：Retinex特征(3) + 色彩恢复特征(3) = 6通道
+        # 输出：注意力图(1通道)
+        attention_in_channels = 6
+        self.attention_generator = nn.Sequential(
+            nn.Conv2d(attention_in_channels, 32, kernel_size=3, padding=1),
+            nn.GELU(),
+            nn.Conv2d(32, 16, kernel_size=3, padding=1),
+            nn.GELU(),
+            nn.Conv2d(16, 1, kernel_size=1),
+        )
+        
+        # ========== 高斯核（用于Retinex分解）==========
         # 创建1D高斯核（用于可分离卷积）
         # 注意：可分离卷积在数学上完全等价于2D卷积，不会损失精度
         # 因为高斯核可以分解为 G(x,y) = G(x) * G(y)
@@ -118,25 +184,69 @@ class MSRCREnhanced(nn.Module):
         return blurred
 
     def forward(self, x):
-        # x: input image [B, C, H, W]
+        """
+        物理感知注意力生成
+        
+        Args:
+            x: 输入图像 [B, C, H, W]，值域 [0, 1]
+            
+        Returns:
+            attention_map: 物理感知注意力图 [B, 1, H, W]
+                - 高值区域：受天气影响大，需要主网络更多关注
+                - 低值区域：图像质量好，正常处理
+            degradation_level: 图像退化程度 [B, 1]（可选，用于监控）
+        """
+        B, C, H, W = x.shape
+        
+        # ========== Step 1: 估计图像退化程度 ==========
+        # 用于自适应调整注意力强度
+        degradation_level = None
+        if self.adaptive_strength:
+            degradation_level = self.degradation_estimator(x)  # [B, 1]
+        
+        # ========== Step 2: 多尺度Retinex分解 ==========
+        # 基于Retinex理论：I = R * L
+        # log(I) = log(R) + log(L)
+        # R = log(I) - log(L)，其中L通过高斯模糊估计
         retinex_outputs = []
         
         for i, sigma in enumerate(self.scales):
             if self.use_separable:
-                # 使用可分离卷积（快速）
                 blurred = self._gaussian_blur_separable(x, self.gaussian_kernels_1d[i], sigma)
             else:
-                # 使用原始2D卷积（慢）
                 kernel = self.gaussian_kernels_2d[i].to(x.device)
                 blurred = F.conv2d(x, kernel, padding=kernel.size(-1)//2, groups=3)
             
+            # Retinex分解：提取反射分量
             retinex = torch.log(x + 1e-6) - torch.log(blurred + 1e-6)
             retinex_outputs.append(retinex)
         
+        # 多尺度融合
         msr = torch.stack(retinex_outputs, dim=1)
-        msr = (msr * self.weights.to(x.device)).sum(dim=1)
-        # 简易色彩恢复
-        mean_per_channel = x.mean(dim=(2,3), keepdim=True)
-        color_restore = (x / (mean_per_channel + 1e-6)).clamp_max(10.0)
-        enhanced = msr * color_restore
-        return enhanced
+        msr = (msr * self.weights.to(x.device)).sum(dim=1)  # [B, 3, H, W]
+        
+        # ========== Step 3: 色彩恢复特征 ==========
+        # 极端天气下色彩信息也会退化，通过色彩恢复特征辅助注意力生成
+        mean_per_channel = x.mean(dim=(2, 3), keepdim=True)
+        color_restore = (x / (mean_per_channel + 1e-6)).clamp_max(10.0)  # [B, 3, H, W]
+        
+        # ========== Step 4: 生成物理感知注意力图 ==========
+        # 结合Retinex特征和色彩恢复特征
+        attention_features = torch.cat([msr, color_restore], dim=1)  # [B, 6, H, W]
+        attention_logits = self.attention_generator(attention_features)  # [B, 1, H, W]
+        
+        # 基础注意力图（Sigmoid归一化到[0, 1]）
+        attention_map = torch.sigmoid(attention_logits)
+        
+        # ========== Step 5: 自适应强度调整 ==========
+        # 根据图像退化程度调整注意力强度
+        # 极端天气（退化严重）-> 注意力更强
+        # 正常天气（退化轻微）-> 注意力更弱，避免过度干预
+        if self.adaptive_strength and degradation_level is not None:
+            # degradation_level: [B, 1] -> [B, 1, 1, 1]
+            strength = degradation_level.view(B, 1, 1, 1)
+            # 最小强度0.3，最大强度1.0
+            strength = 0.3 + 0.7 * strength
+            attention_map = attention_map * strength
+        
+        return attention_map

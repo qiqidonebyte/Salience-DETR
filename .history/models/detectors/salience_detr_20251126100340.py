@@ -217,46 +217,58 @@ class PhysAwareDETR(DNDETRDetector):
             else:
                 self.num_feature_levels = 3  # 回退到常见的3个尺度
         if self.msrcr_enhanced is not None:
-            # 物理感知注意力门控参数（每个特征层独立）
-            # 初始化为较小值，让模型逐步学习如何利用物理注意力
-            # 使用可学习参数让模型自适应决定每层的注意力强度
-            self.physical_gate_strength = nn.Parameter(torch.zeros(self.num_feature_levels, 1, 1, 1))
+            # 双路径特征融合参数
+            # alpha: 控制原始特征和增强特征的融合比例
+            # 初始化为0.5，让模型学习最优融合比例
+            self.fusion_alpha = nn.Parameter(torch.ones(self.num_feature_levels, 1, 1, 1) * 0.5)
+            # beta: 控制物理注意力的强度（用于特征调制）
+            # 初始化为0.1，避免初期过度影响
+            self.physical_gate_strength = nn.Parameter(torch.ones(self.num_feature_levels, 1, 1, 1) * 0.1)
 
     def forward(self, images: List[Tensor], targets: List[Dict] = None):
         # get original image sizes, used for postprocess
         original_image_sizes = self.query_original_sizes(images)
         images, targets, mask = self.preprocess(images, targets)
 
-        # ================================================================
-        # 物理感知引导注意力机制 (Physics-Aware Guided Attention)
-        # ================================================================
-        # 设计：轻量级并行旁路
-        #   - 主路径：原始图像 → Backbone → FPN → Neck → 特征
-        #   - 旁路：  原始图像 → MSRCR模块 → 物理感知注意力图
-        #   - 融合：  注意力图引导主路径特征，告诉网络"关注哪些区域"
-        # ================================================================
+        attention_map = None
+        enhanced_images = None
         
-        physical_attention_map = None
-        
-        # 旁路：物理感知注意力生成（轻量级，与Backbone并行）
+        # 物理光学增强模块（针对极端天气场景）
+        # 创新点：双路径设计 - 原始路径 + 增强路径
         if self.msrcr_enhanced is not None:
-            # 反归一化到 [0, 1] 范围
+            # 反归一化到 [0, 1] 范围，MSRCR需要在这个范围工作
             mean = torch.tensor([0.485, 0.456, 0.406], device=images.tensors.device).view(1, 3, 1, 1)
             std = torch.tensor([0.229, 0.224, 0.225], device=images.tensors.device).view(1, 3, 1, 1)
             denormalized = torch.clamp(images.tensors * std + mean, 0.0, 1.0)
             
-            # 生成物理感知注意力图
-            # 注意力图含义：高值区域表示受天气影响大，需要更多关注
-            physical_attention_map = self.msrcr_enhanced(denormalized)
+            # 获取注意力图和增强后的图像
+            attention_map, enhanced_images = self.msrcr_enhanced(denormalized, return_enhanced_image=True)
+            
+            # 将增强后的图像重新归一化，用于backbone提取特征
+            enhanced_images_normalized = (enhanced_images - mean) / std
 
-        # 主路径：原始图像特征提取
-        multi_level_feats = self.backbone(images.tensors)
-        multi_level_feats = self.fpn(multi_level_feats)
-        multi_level_feats = self.neck(multi_level_feats)
+        # 路径1：原始图像特征提取
+        multi_level_feats_original = self.backbone(images.tensors)
+        multi_level_feats_original = self.fpn(multi_level_feats_original)
+        multi_level_feats_original = self.neck(multi_level_feats_original)
         
-        # 融合：用物理感知注意力图引导主路径特征
-        if physical_attention_map is not None:
-            multi_level_feats = self._apply_physical_attention(multi_level_feats, physical_attention_map)
+        # 路径2：增强图像特征提取（仅在启用MSRCR时）
+        if enhanced_images is not None:
+            multi_level_feats_enhanced = self.backbone(enhanced_images_normalized)
+            multi_level_feats_enhanced = self.fpn(multi_level_feats_enhanced)
+            multi_level_feats_enhanced = self.neck(multi_level_feats_enhanced)
+            
+            # 双路径特征融合：自适应融合原始特征和增强特征
+            multi_level_feats = self._fuse_dual_path_features(
+                multi_level_feats_original, 
+                multi_level_feats_enhanced,
+                attention_map
+            )
+        else:
+            multi_level_feats = multi_level_feats_original
+            # 即使没有增强路径，也可以应用注意力图（如果存在）
+            if attention_map is not None:
+                multi_level_feats = self._apply_physical_attention(multi_level_feats, attention_map)
 
         multi_level_masks = []
         multi_level_position_embeddings = []
@@ -331,48 +343,80 @@ class PhysAwareDETR(DNDETRDetector):
         detections = self.postprocessor(output, original_image_sizes)
         return detections
 
-    def _apply_physical_attention(self, features: List[Tensor], attention_map: Tensor) -> List[Tensor]:
+    def _fuse_dual_path_features(
+        self, 
+        features_original: List[Tensor], 
+        features_enhanced: List[Tensor],
+        attention_map: Tensor
+    ) -> List[Tensor]:
         """
-        物理感知注意力引导的特征调制
+        双路径特征融合：自适应融合原始特征和增强特征
         
-        设计思想：
-            注意力图告诉主网络"应该更关注原始图像的哪些区域"（如被薄雾遮挡的区域）
-            通过门控机制，模型可以自适应地决定在每个特征层如何利用物理注意力
-        
-        公式：
-            output = feat * (1 + gate * attention)
-            - feat: 主路径特征
-            - attention: 物理感知注意力图（高值=需要更多关注）
-            - gate: 可学习的门控参数（控制注意力强度）
+        创新点：
+        1. 双路径设计：原始路径保留正常天气下的特征，增强路径提供极端天气下的鲁棒特征
+        2. 自适应融合：根据图像质量和特征质量，动态调整融合比例
+        3. 注意力引导：使用物理注意力图指导融合，突出重要区域
         
         理论支撑：
-            在极端天气下，某些区域（如被雾遮挡）的特征可能较弱，
-            通过物理注意力图增强这些区域的特征响应，提升检测能力
+        - 在正常天气下，原始特征更可靠，融合比例应该偏向原始特征
+        - 在极端天气下，增强特征更可靠，融合比例应该偏向增强特征
+        - 通过可学习的alpha参数，模型可以自动学习最优融合策略
         """
-        modulated_features = []
+        fused_features = []
+        num_levels = len(features_original)
+        num_alpha = self.fusion_alpha.shape[0]
         num_strength = self.physical_gate_strength.shape[0]
         
-        for level_idx, feat in enumerate(features):
-            # 将注意力图调整到当前特征图尺寸
-            attn_resized = F.interpolate(
-                attention_map, 
-                size=feat.shape[-2:], 
-                mode="bilinear", 
-                align_corners=False
-            )
+        for level_idx in range(num_levels):
+            feat_orig = features_original[level_idx]
+            feat_enh = features_enhanced[level_idx]
             
-            # 获取该层的门控强度
+            # 获取该层级的融合参数
+            alpha_idx = min(level_idx, num_alpha - 1)
             strength_idx = min(level_idx, num_strength - 1)
-            gate = self.physical_gate_strength[strength_idx]
             
-            # 门控机制：sigmoid确保在[0, 1]范围内
-            # 初始化为0时，sigmoid(0)=0.5，模型从适中的注意力强度开始学习
-            gated_strength = torch.sigmoid(gate)
+            # alpha: 控制原始特征和增强特征的融合比例
+            # 使用sigmoid确保在[0, 1]范围内，初始值0.5表示等权重融合
+            alpha = torch.sigmoid(self.fusion_alpha[alpha_idx])
             
-            # 注意力引导的特征调制
-            # 高注意力区域的特征被增强，低注意力区域保持不变
-            # 使用残差连接确保训练稳定性
-            modulated = feat * (1.0 + gated_strength * attn_resized)
-            modulated_features.append(modulated)
+            # 基础融合：alpha * feat_orig + (1-alpha) * feat_enh
+            fused = alpha * feat_orig + (1.0 - alpha) * feat_enh
+            
+            # 使用物理注意力图进一步调制融合后的特征
+            if attention_map is not None:
+                attn_resized = F.interpolate(
+                    attention_map, 
+                    size=feat_orig.shape[-2:], 
+                    mode="bilinear", 
+                    align_corners=False
+                )
+                # beta: 控制物理注意力的强度
+                beta = torch.sigmoid(self.physical_gate_strength[strength_idx] * 5.0)
+                
+                # 注意力引导的特征增强
+                # 在注意力高的区域，增强特征的影响；在注意力低的区域，保持原始特征
+                attention_guided = fused * (1.0 + beta * attn_resized)
+                fused_features.append(attention_guided)
+            else:
+                fused_features.append(fused)
         
-        return modulated_features
+        return fused_features
+    
+    def _apply_physical_attention(self, features: List[Tensor], attention_map: Tensor) -> List[Tensor]:
+        """
+        使用物理增强生成的注意力图对多尺度特征进行条件化调制。
+        这是单路径模式下的注意力应用（当没有增强路径时）。
+        """
+        fused_features = []
+        num_strength = self.physical_gate_strength.shape[0]
+        for level_idx, feat in enumerate(features):
+            attn_resized = F.interpolate(attention_map, size=feat.shape[-2:], mode="bilinear", align_corners=False)
+            strength_idx = min(level_idx, num_strength - 1)
+            level_strength = self.physical_gate_strength[strength_idx]
+            
+            # 使用可学习的门控，让模型决定是否使用物理注意力
+            gated_strength = torch.sigmoid(level_strength * 5.0)
+            
+            # 残差连接，让模型可以选择性地增强特征
+            fused_features.append(feat + gated_strength * (feat * attn_resized - feat))
+        return fused_features

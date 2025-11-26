@@ -13,7 +13,7 @@ from models.bricks.salience_transformer import (
     SalienceTransformerEncoderLayer,
 )
 from models.bricks.set_criterion import HybridSetCriterion
-from models.detectors.salience_detr import SalienceCriterion, SalienceDETR
+from models.detectors.salience_detr import SalienceCriterion, PhysAwareDETR
 from models.matcher.hungarian_matcher import HungarianMatcher
 from models.necks.channel_mapper import ChannelMapper
 from models.necks.repnet import RepVGGPluXNetwork
@@ -107,7 +107,7 @@ msrcr_enhanced = None
 # msrcr_enhanced = MSRCREnhanced(scales=[15, 80, 250], weights=[1.0, 1.0, 1.0])
 
 # combine above components to instantiate the model
-model = SalienceDETR(
+model = PhysAwareDETR(
     backbone=backbone,
     neck=neck,
     position_embedding=position_embedding,
