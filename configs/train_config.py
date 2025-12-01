@@ -18,7 +18,7 @@ find_unused_parameters = False  # useful for debugging distributed training
 
 # define dataset for train
 # coco_path = "/home/rjzy/PycharmProjects/data/SeaDronesSeeOD2/uncompressed"  # /PATH/TO/YOUR/COCODIR
-coco_path = '/home/rjzy/PycharmProjects/data/SeaDronesSeeOD2/compressed_version/dataset'
+coco_path = '/app/data/seadronessee/compressed_version'
 # coco_path = '/home/rjzy/Documents/SalienceDETR/Salience-DETR/data/1000minidata'
 # coco_path = '/home/rjzy/Documents/SalienceDETR/Salience-DETR/data/coco'
 train_transform = presets.detr  # see transforms/presets to choose a transform

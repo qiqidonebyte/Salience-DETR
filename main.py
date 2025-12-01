@@ -7,6 +7,9 @@ import time
 
 import accelerate
 import torch
+# 设置全局默认的整数类型为 int64 (long)，NPU通常支持此类型
+torch.set_default_dtype(torch.float32)  # 浮点数默认仍为float32
+
 from accelerate import Accelerator, DistributedDataParallelKwargs
 from accelerate.logging import get_logger
 from accelerate.tracking import TensorBoardTracker
