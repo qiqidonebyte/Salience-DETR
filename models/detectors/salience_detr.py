@@ -65,9 +65,17 @@ class SalienceCriterion(nn.Module):
         start = 0
         for gt_boxes in gt_boxes_list:
             num_inst = gt_boxes.shape[0]
-            img_level_weights.append(size_weights[start : start + num_inst].mean())
+            if num_inst == 0:
+                # 如果该图片没有目标，给予中性权重 1.0，避免 nan
+                img_level_weights.append(torch.tensor(1.0, device=size_weights.device, dtype=size_weights.dtype))
+            else:
+                img_level_weights.append(size_weights[start : start + num_inst].mean())
             start += num_inst
-        global_scale = torch.stack(img_level_weights).mean().detach()
+
+        if len(img_level_weights) == 0:
+            global_scale = torch.tensor(1.0, device=foreground_mask.device, dtype=foreground_mask.dtype)
+        else:
+            global_scale = torch.stack(img_level_weights).mean().detach()
 
         salience_loss = base_loss * global_scale
         return {"loss_salience": salience_loss}
