@@ -25,7 +25,8 @@ class LocalAttentionWindowModule(nn.Module):
             attn_mask[i, start_col:end_col] = True
 
         # 填充对角线，表示每个查询至少关注自己
-        torch.fill_diagonal(attn_mask, 1)
+        # 兼容旧版 PyTorch：使用张量自带的 in-place 接口
+        attn_mask.fill_diagonal_(True)
 
         return attn_mask
 
