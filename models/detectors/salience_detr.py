@@ -49,22 +49,27 @@ class SalienceCriterion(nn.Module):
         foreground_mask = torch.cat([e.flatten(-2) for e in foreground_mask], -1)
         foreground_mask = foreground_mask.squeeze(1)
 
-        if True:
-            # 计算目标的显著性得分权重
-            size_weights = self.compute_size_weights(gt_boxes_list)
-            # 动态调整显著性得分
-            adjusted_foreground_mask = self.adjust_salience_scores(foreground_mask, size_weights)
-
         num_pos = torch.sum(mask_targets > 0.5 * self.noise_scale).clamp_(min=1)
-        salience_loss = (
-            sigmoid_focal_loss(
-                foreground_mask,
-                mask_targets,
-                num_pos,
-                alpha=self.alpha,
-                gamma=self.gamma,
-            ) * adjusted_foreground_mask.shape[1]
+        base_loss = sigmoid_focal_loss(
+            foreground_mask,
+            mask_targets,
+            num_pos,
+            alpha=self.alpha,
+            gamma=self.gamma,
         )
+
+        # 基于目标尺寸的全局重加权：小目标占比越高，loss 权重越大（提升小目标关注度）
+        size_weights = self.compute_size_weights(gt_boxes_list)
+        # 将每张图像的目标权重取平均，再在 batch 维度取平均，得到一个稳定的尺度因子（范围约 0.5–2.0）
+        img_level_weights = []
+        start = 0
+        for gt_boxes in gt_boxes_list:
+            num_inst = gt_boxes.shape[0]
+            img_level_weights.append(size_weights[start : start + num_inst].mean())
+            start += num_inst
+        global_scale = torch.stack(img_level_weights).mean().detach()
+
+        salience_loss = base_loss * global_scale
         return {"loss_salience": salience_loss}
 
     def compute_size_weights(self, gt_boxes_list, min_area_threshold=None):

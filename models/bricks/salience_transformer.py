@@ -8,6 +8,7 @@ from torch import nn
 
 from models.bricks.base_transformer import TwostageTransformer
 from models.bricks.basic import MLP
+from models.bricks.local_attn import LocalAttentionWindowModule
 from models.bricks.ms_deform_attn import MultiScaleDeformableAttention
 from models.bricks.position_encoding import PositionEmbeddingLearned, get_sine_pos_embed
 from util.misc import inverse_sigmoid
@@ -507,10 +508,19 @@ class SalienceTransformerDecoderLayer(nn.Module):
         activation=nn.ReLU(inplace=True),
         n_levels=4,
         n_points=4,
+        use_local_window_attn: bool = True,
+        min_window_size: int = 33,
+        max_window_size: int = 99,
     ):
         super().__init__()
         self.embed_dim = embed_dim
         self.num_heads = n_heads
+        self.use_local_window_attn = use_local_window_attn
+        if self.use_local_window_attn:
+            self.local_attn = LocalAttentionWindowModule(
+                min_window_size=min_window_size,
+                max_window_size=max_window_size,
+            )
         # cross attention
         self.cross_attn = MultiScaleDeformableAttention(embed_dim, n_levels, n_heads, n_points)
         self.dropout1 = nn.Dropout(dropout)
@@ -559,17 +569,46 @@ class SalienceTransformerDecoderLayer(nn.Module):
         level_start_index,
         self_attn_mask=None,
         key_padding_mask=None,
+        boxes=None,
     ):
-        # self attention
-        query_with_pos = key_with_pos = self.with_pos_embed(query, query_pos)
-        query2 = self.self_attn(
-            query=query_with_pos,
-            key=key_with_pos,
-            value=query,
-            attn_mask=self_attn_mask,
-        )[0]
-        query = query + self.dropout2(query2)
-        query = self.norm2(query)
+        # self attention（支持可选局部窗口注意力）
+        if self.use_local_window_attn and boxes is not None:
+            # boxes: [B, Q, 4] in cxcywh (0-1) 空间，近似用于估计目标尺度
+            # 为每个 batch 独立构建局部注意力掩码
+            bsz, num_queries, _ = boxes.shape
+            attn_outputs = []
+            for b in range(bsz):
+                # 当前图片的查询及位置编码 [1, Q, C]
+                q_b = query[b : b + 1]
+                pos_b = query_pos[b : b + 1]
+                # 将 cxcywh 映射到“相对索引”空间，这里仅使用 w,h 作为尺度参考
+                box_sizes = boxes[b]  # [Q, 4]
+                # local_attn 期望的是类似 [Q, 4] 的 boxes；内部只用 size 来决定窗口
+                local_mask_allow = self.local_attn(box_sizes)  # True 表示允许关注
+                # nn.MultiheadAttention 的 attn_mask 中 True/非零表示禁止关注，因此需要取反
+                local_mask_block = ~local_mask_allow
+                # apply self-attention for this image only
+                q_with_pos = key_with_pos = self.with_pos_embed(q_b, pos_b)
+                q2 = self.self_attn(
+                    query=q_with_pos,
+                    key=key_with_pos,
+                    value=q_b,
+                    attn_mask=local_mask_block,
+                )[0]
+                q_b = q_b + self.dropout2(q2)
+                q_b = self.norm2(q_b)
+                attn_outputs.append(q_b)
+            query = torch.cat(attn_outputs, dim=0)
+        else:
+            query_with_pos = key_with_pos = self.with_pos_embed(query, query_pos)
+            query2 = self.self_attn(
+                query=query_with_pos,
+                key=key_with_pos,
+                value=query,
+                attn_mask=self_attn_mask,
+            )[0]
+            query = query + self.dropout2(query2)
+            query = self.norm2(query)
 
         # cross attention
         query2 = self.cross_attn(
@@ -653,6 +692,7 @@ class SalienceTransformerDecoder(nn.Module):
                 level_start_index=level_start_index,
                 key_padding_mask=key_padding_mask,
                 self_attn_mask=attn_mask,
+                boxes=reference_points,
             )
 
             # get output, reference_points are not detached for look_forward_twice
