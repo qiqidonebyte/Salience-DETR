@@ -41,11 +41,14 @@ def train_one_epoch_acc(
             optimizer=optimizer, start_factor=warmup_factor, total_iters=warmup_iters
         )
 
+    logger.info("Creating DataPrefetcher...")
     prefetcher = DataPrefetcher(data_loader, accelerator.device)
+    logger.info("DataPrefetcher created, loading first batch...")
     next_data_time = None
     data_start_time = time.perf_counter()
     images, targets = prefetcher.next()
     data_time = time.perf_counter() - data_start_time
+    logger.info(f"First batch loaded in {data_time:.2f} seconds, starting training loop...")
     iter_start_time = time.perf_counter()
     for i in range(len(data_loader)):
         with accelerator.accumulate(model):

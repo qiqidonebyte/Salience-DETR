@@ -13,10 +13,11 @@ from models.bricks.salience_transformer import (
     SalienceTransformerEncoderLayer,
 )
 from models.bricks.set_criterion import HybridSetCriterion
-from models.detectors.salience_detr import SalienceCriterion, SalienceDETR
+from models.detectors.salience_detr import SalienceCriterion, PhysAwareDETR
 from models.matcher.hungarian_matcher import HungarianMatcher
 from models.necks.channel_mapper import ChannelMapper
 from models.necks.repnet import RepVGGPluXNetwork
+from models.bricks.msrcr_enhanced import MSRCREnhanced
 
 # mostly changed parameters
 embed_dim = 256
@@ -98,8 +99,16 @@ criterion = HybridSetCriterion(num_classes, matcher=matcher, weight_dict=weight_
 foreground_criterion = SalienceCriterion(noise_scale=0.0, alpha=0.25, gamma=2.0)
 postprocessor = PostProcess(select_box_nums_for_evaluation=300)
 
+# 物理光学增强模块（MSRCR）- 可选，设置为 None 则禁用
+# 参数说明：
+#   scales: 多尺度高斯核的尺度参数，默认 [15, 80, 250]
+#   weights: 各尺度的权重，默认 [1.0, 1.0, 1.0]
+msrcr_enhanced = MSRCREnhanced(scales=[15, 80, 250], weights=[1.0, 1.0, 1.0])
+# 如果不想使用 MSRCR 增强，设置为 None：
+# msrcr_enhanced = None
+
 # combine above components to instantiate the model
-model = SalienceDETR(
+model = PhysAwareDETR(
     backbone=backbone,
     neck=neck,
     position_embedding=position_embedding,
@@ -112,4 +121,5 @@ model = SalienceDETR(
     aux_loss=True,
     min_size=800,
     max_size=1333,
+    msrcr_enhanced=msrcr_enhanced,  # 传入 MSRCR 增强模块
 )

@@ -17,7 +17,7 @@ except ImportError:
 class Config:
     def __init__(self, file_path, name_space={}, partials=()): # 构造函数接受三个参数，file_path 是配置文件的路径，name_space 是一个字典，用于存储执行代码后的变量，partials 是一个元组，包含要优化的函数调用。
         self.partials = partials
-        with open(file_path, "r") as f: # 打开并读取配置文件。
+        with open(file_path, "r", encoding="utf-8") as f: # 打开并读取配置文件。
             code = f.read()
         if len(partials) != 0: # 如果 partials 不为空，调用 self.partial_optim(code) 方法来修改代码，以便使用 functools.partial 来优化部分函数调用。
             code = self.partial_optim(code)
@@ -44,7 +44,7 @@ class Config:
 class LazyConfig:
     def __init__(self, file_path, name_space={}, lazy={}):
         self.lazy = lazy
-        with open(file_path, "r") as f:
+        with open(file_path, "r", encoding="utf-8") as f:
             code = f.read()
         if len(self.lazy) != 0:
             code = self.replace_call_with_lazy_call(code)

@@ -138,10 +138,13 @@ def default_setup(args, cfg, accelerator):
 
     logger.info("Command line arguments: " + str(args))
     if hasattr(args, "config_file") and args.config_file != "":
+        # Read config file with UTF-8 encoding to avoid encoding issues on Windows
+        with open(args.config_file, "r", encoding="utf-8") as f:
+            config_content = f.read()
         logger.info(
             "Contents of args.config_file={}:\n{}".format(
                 args.config_file,
-                _highlight(PathManager.open(args.config_file, "r").read(), args.config_file),
+                _highlight(config_content, args.config_file),
             )
         )
 
