@@ -59,7 +59,6 @@ class HighFrequencyPerception(nn.Module):
     """
     高频感知模块（HFP）
     通过DCT变换提取高频特征，增强小目标的边缘和细节
-    参考：HS-FPN: High Frequency and Spatial Perception FPN for Tiny Object Detection [6,8](@ref)
     """
 
     def __init__(self, in_channels):
@@ -85,23 +84,28 @@ class HighFrequencyPerception(nn.Module):
         )
 
     def dct_transform(self, x):
-        """简化的DCT变换实现"""
+        """修复的DCT变换实现"""
         batch, channels, height, width = x.shape
-
-        # 创建DCT基函数（简化版本）
-        dct_basis_h = torch.zeros(height, height, device=x.device)
-        dct_basis_w = torch.zeros(width, width, device=x.device)
-
-        for i in range(height):
-            for j in range(height):
-                dct_basis_h[i, j] = torch.cos(torch.pi * (2 * i + 1) * j / (2 * height))
-
-        for i in range(width):
-            for j in range(width):
-                dct_basis_w[i, j] = torch.cos(torch.pi * (2 * i + 1) * j / (2 * width))
+        device = x.device
+        dtype = x.dtype
+        
+        # 使用torch.tensor的pi
+        pi = torch.tensor(torch.pi, device=device, dtype=dtype)
+        
+        # 创建索引张量
+        i_h = torch.arange(height, device=device, dtype=dtype).view(height, 1)
+        j_h = torch.arange(height, device=device, dtype=dtype).view(1, height)
+        
+        i_w = torch.arange(width, device=device, dtype=dtype).view(width, 1)
+        j_w = torch.arange(width, device=device, dtype=dtype).view(1, width)
+        
+        # 计算DCT基函数
+        dct_basis_h = torch.cos(pi * (2 * i_h + 1) * j_h / (2 * height))
+        dct_basis_w = torch.cos(pi * (2 * i_w + 1) * j_w / (2 * width))
 
         # 应用DCT变换
-        x_dct = torch.matmul(dct_basis_h, x.reshape(batch * channels, height, width))
+        x_reshaped = x.reshape(batch * channels, height, width)
+        x_dct = torch.matmul(dct_basis_h, x_reshaped)
         x_dct = torch.matmul(x_dct, dct_basis_w.T)
         x_dct = x_dct.reshape(batch, channels, height, width)
 
@@ -109,18 +113,25 @@ class HighFrequencyPerception(nn.Module):
 
     def high_pass_filter(self, x_dct):
         """高通滤波：保留高频成分"""
-        # 创建高通掩码（保留高频部分）
-        _, _, h, w = x_dct.shape
-        mask = torch.ones_like(x_dct)
+        batch, channels, h, w = x_dct.shape
+        device = x_dct.device
+        
+        # 创建高通掩码（向量化版本）
         center_h, center_w = h // 2, w // 2
-        radius = min(center_h, center_w) // 4  # 保留高频区域
-
-        # 创建圆形掩码（中心低频区域置零）
-        for i in range(h):
-            for j in range(w):
-                if (i - center_h) ** 2 + (j - center_w) ** 2 <= radius ** 2:
-                    mask[:, :, i, j] = 0
-
+        radius = min(center_h, center_w) // 4
+        
+        # 创建坐标网格
+        y_coords = torch.arange(h, device=device).view(h, 1)
+        x_coords = torch.arange(w, device=device).view(1, w)
+        
+        # 计算距离平方
+        dist_sq = (y_coords - center_h) ** 2 + (x_coords - center_w) ** 2
+        
+        # 创建掩码（高频区域为1，低频区域为0）
+        mask = (dist_sq > radius ** 2).float()
+        mask = mask.unsqueeze(0).unsqueeze(0)  # 扩展为 [1, 1, h, w]
+        mask = mask.expand(batch, channels, h, w)  # 扩展为 [batch, channels, h, w]
+        
         high_freq = x_dct * mask
         return high_freq
 
@@ -132,7 +143,7 @@ class HighFrequencyPerception(nn.Module):
         high_freq = self.high_pass_filter(x_dct)
 
         # 逆DCT变换（简化实现）
-        high_freq_spatial = self.dct_transform(high_freq)  # 由于DCT正交，逆变换近似
+        high_freq_spatial = self.dct_transform(high_freq)
 
         # 生成通道和空间注意力
         channel_att = self.channel_path(high_freq_spatial)
