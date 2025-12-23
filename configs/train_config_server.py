@@ -6,9 +6,9 @@ from transforms import presets
 from optimizer import param_dict
 
 # ========== 服务器训练配置（800x1333，48 epoch，ResNet50）==========
-num_epochs = 48
-batch_size = 1  # total_batch_size = #GPU x batch_size
-num_workers = 4  # 按服务器资源调整，若不足可降到 2
+num_epochs = 24
+batch_size = 4  # total_batch_size = #GPU x batch_size
+num_workers =32  # 按服务器资源调整，若不足可降到 2
 pin_memory = True
 print_freq = 50
 starting_epoch = 0
@@ -18,7 +18,7 @@ output_dir = None  # None 时默认 checkpoints/{model_name}
 find_unused_parameters = False
 
 # 数据集路径（服务器）
-coco_path = '/data/seadronessee/Downloads/Uncompressed Version'
+coco_path = ''
 train_transform = presets.detr
 train_dataset = CocoDetection(
     img_folder=f"{coco_path}/images/train",
@@ -48,7 +48,7 @@ if "RESUME_FROM_CHECKPOINT" in os.environ:
 learning_rate = 1e-4
 optimizer = optim.AdamW(lr=learning_rate, weight_decay=1e-4, betas=(0.9, 0.999))
 # 调整 milestone 到后半程（24, 36），保持 48 epoch 训练
-lr_scheduler = optim.lr_scheduler.MultiStepLR(milestones=[24, 36], gamma=0.1)
+lr_scheduler = optim.lr_scheduler.MultiStepLR(milestones=[10], gamma=0.1)
 
 # 参数分组
 param_dicts = param_dict.finetune_backbone_and_linear_projection(lr=learning_rate)
