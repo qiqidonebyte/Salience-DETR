@@ -116,8 +116,8 @@ class SalienceTransformer(TwostageTransformer):
         # calculate filtered tokens numbers for each feature map
         reverse_multi_level_masks = [~m for m in multi_level_masks]
         valid_token_nums = torch.stack([m.sum((1, 2)) for m in reverse_multi_level_masks], -1)
-        focus_token_nums = (valid_token_nums * self.level_filter_ratio).int()
-        level_token_nums = focus_token_nums.max(0)[0]
+        focus_token_nums = (valid_token_nums * self.level_filter_ratio).long()
+        level_token_nums = focus_token_nums.max(0)[0].long()
         focus_token_nums = focus_token_nums.sum(-1)
 
         # from high level to low level
