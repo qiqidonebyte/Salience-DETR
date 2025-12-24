@@ -8,7 +8,7 @@ __pycache__/
 
 # 
 kernel_meta/
-
+extra-info/
 
 # Distribution / packaging
 .Python
