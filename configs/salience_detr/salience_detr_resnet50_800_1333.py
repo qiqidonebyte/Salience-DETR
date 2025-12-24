@@ -13,11 +13,10 @@ from models.bricks.salience_transformer import (
     SalienceTransformerEncoderLayer,
 )
 from models.bricks.set_criterion import HybridSetCriterion
-from models.detectors.salience_detr import SalienceCriterion, PhysAwareDETR
+from models.detectors.salience_detr import SalienceCriterion, SalienceDETR
 from models.matcher.hungarian_matcher import HungarianMatcher
 from models.necks.channel_mapper import ChannelMapper
 from models.necks.repnet import RepVGGPluXNetwork
-from models.bricks.msrcr_enhanced import MSRCREnhanced
 
 # mostly changed parameters
 embed_dim = 256
@@ -37,8 +36,7 @@ backbone = ResNetBackbone(
 )
 
 neck = ChannelMapper(
-    # in_channels=backbone.num_channels,
-    in_channels=[embed_dim,embed_dim,embed_dim],
+    in_channels=backbone.num_channels,
     out_channels=embed_dim,
     num_outs=num_feature_levels,
 )
@@ -85,7 +83,18 @@ transformer = SalienceTransformer(
 
 matcher = HungarianMatcher(cost_class=2, cost_bbox=5, cost_giou=2)
 
-weight_dict = {"loss_class": 1, "loss_bbox": 5, "loss_giou": 2}
+# 1. 创建MarineOpticalLoss实例
+from models.bricks.fpn2 import MarineOpticalLoss
+optical_loss_module = MarineOpticalLoss()
+
+# 2. 配置weight_dict（确保包含光学损失权重）
+weight_dict = {
+    "loss_class": 1.0,
+    "loss_bbox": 5.0,
+    "loss_giou": 2.0,
+    "loss_optical": 0.1,  # 光学损失权重
+}
+
 weight_dict.update({"loss_class_dn": 1, "loss_bbox_dn": 5, "loss_giou_dn": 2})
 weight_dict.update({
     k + f"_{i}": v
@@ -95,20 +104,28 @@ weight_dict.update({
 weight_dict.update({"loss_class_enc": 1, "loss_bbox_enc": 5, "loss_giou_enc": 2})
 weight_dict.update({"loss_salience": 2})
 
+
+
 criterion = HybridSetCriterion(num_classes, matcher=matcher, weight_dict=weight_dict, alpha=0.25, gamma=2.0)
+# 3. 创建SetCriterion
+criterion = SetCriterion(
+    num_classes=num_classes,
+    matcher=matcher,
+    weight_dict=weight_dict,
+    alpha=0.25,
+    gamma=2.0,
+    use_optical_loss=True,
+    optical_loss_weight=0.1,
+    optical_loss_module=optical_loss_module,
+    optical_loss_freq=2,  # 每2次迭代计算一次
+    progressive_weight=True,  # 使用渐进式权重
+)
+
 foreground_criterion = SalienceCriterion(noise_scale=0.0, alpha=0.25, gamma=2.0)
 postprocessor = PostProcess(select_box_nums_for_evaluation=300)
 
-# 物理光学增强模块（MSRCR）- 可选，设置为 None 则禁用
-# 参数说明：
-#   scales: 多尺度高斯核的尺度参数，默认 [15, 80, 250]
-#   weights: 各尺度的权重，默认 [1.0, 1.0, 1.0]
-msrcr_enhanced = MSRCREnhanced(scales=[15, 80, 250], weights=[1.0, 1.0, 1.0])
-# 如果不想使用 MSRCR 增强，设置为 None：
-# msrcr_enhanced = None
-
 # combine above components to instantiate the model
-model = PhysAwareDETR(
+model = SalienceDETR(
     backbone=backbone,
     neck=neck,
     position_embedding=position_embedding,
@@ -121,5 +138,4 @@ model = PhysAwareDETR(
     aux_loss=True,
     min_size=800,
     max_size=1333,
-    msrcr_enhanced=msrcr_enhanced,  # 传入 MSRCR 增强模块
 )
