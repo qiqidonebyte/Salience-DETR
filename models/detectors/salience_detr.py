@@ -157,7 +157,7 @@ class SalienceCriterion(nn.Module):
 
 
 # PhysAwareDETR has the architecture similar to FocusDETR
-class PhysAwareDETR(DNDETRDetector):
+class SalienceDETR(DNDETRDetector):
     def __init__(
         # model structure
         self,
