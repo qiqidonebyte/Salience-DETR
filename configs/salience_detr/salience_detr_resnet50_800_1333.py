@@ -12,8 +12,8 @@ from models.bricks.salience_transformer import (
     SalienceTransformerEncoder,
     SalienceTransformerEncoderLayer,
 )
-from models.bricks.set_criterion import HybridSetCriterion
-from models.detectors.salience_detr import SalienceCriterion, SalienceDETR
+from models.bricks.set_criterion import HybridSetCriterion,SetCriterion
+from models.detectors.salience_detr import SalienceCriterion, SalienceDETR  # 这个语法对吗
 from models.matcher.hungarian_matcher import HungarianMatcher
 from models.necks.channel_mapper import ChannelMapper
 from models.necks.repnet import RepVGGPluXNetwork
@@ -106,7 +106,7 @@ weight_dict.update({"loss_salience": 2})
 
 
 
-criterion = HybridSetCriterion(num_classes, matcher=matcher, weight_dict=weight_dict, alpha=0.25, gamma=2.0)
+# criterion = HybridSetCriterion(num_classes, matcher=matcher, weight_dict=weight_dict, alpha=0.25, gamma=2.0)
 # 3. 创建SetCriterion
 criterion = SetCriterion(
     num_classes=num_classes,
