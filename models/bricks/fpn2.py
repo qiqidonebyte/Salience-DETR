@@ -206,7 +206,7 @@ class OpticalPhysicsFPN(nn.Module):
         # 海域小目标专用增强层
         self.marine_enhance = nn.ModuleList([
             nn.Sequential(
-                nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1, dilation=2),
+                nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=2, dilation=2),
                 nn.BatchNorm2d(out_channels),
                 nn.ReLU(inplace=True),
                 nn.Conv2d(out_channels, out_channels, kernel_size=1),
