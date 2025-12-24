@@ -1,5 +1,4 @@
 from torch import nn
-# from torchvision.ops import FrozenBatchNorm2d
 
 from models.backbones.resnet import ResNetBackbone
 from models.bricks.misc import FrozenBatchNorm2d
@@ -12,13 +11,13 @@ from models.bricks.salience_transformer import (
     SalienceTransformerEncoder,
     SalienceTransformerEncoderLayer,
 )
-from models.bricks.set_criterion import HybridSetCriterion,SetCriterion
-from models.detectors.salience_detr import SalienceCriterion, SalienceDETR  # 这个语法对吗
+from models.bricks.set_criterion import SetCriterion
+from models.detectors.salience_detr import SalienceCriterion, SalienceDETR
 from models.matcher.hungarian_matcher import HungarianMatcher
 from models.necks.channel_mapper import ChannelMapper
 from models.necks.repnet import RepVGGPluXNetwork
 
-# mostly changed parameters
+# ========= 配置参数 ==========
 embed_dim = 256
 num_classes = 91
 num_queries = 900
@@ -28,18 +27,29 @@ transformer_dec_layers = 6
 num_heads = 8
 dim_feedforward = 2048
 
-# instantiate model components
-position_embedding = PositionEmbeddingSine(embed_dim // 2, temperature=10000, normalize=True, offset=-0.5)
-
-backbone = ResNetBackbone(
-    "resnet50", norm_layer=FrozenBatchNorm2d, return_indices=(1, 2, 3), freeze_indices=(0,)
+# ==== 组件构建 ====
+position_embedding = PositionEmbeddingSine(
+    embed_dim//2, temperature=10000, normalize=True, offset=-0.5
 )
 
+backbone = ResNetBackbone(
+    "resnet50",
+    norm_layer=FrozenBatchNorm2d,
+    return_indices=(1,2,3),
+    freeze_indices=(0,)
+)
+
+# ========= 修复ChannelMapper的in_channels配置 ===========
+# 获取backbone输出的channel数，确保与ChannelMapper一致
+# backbone.num_channels: tuple/list, e.g., (512, 1024, 2048)
 neck = ChannelMapper(
-    in_channels=backbone.num_channels,
+    in_channels=list(backbone.num_channels),  # 显式转换为list以防万一
     out_channels=embed_dim,
     num_outs=num_feature_levels,
 )
+
+# ========== RepVGGPluXNetwork通道适配 ============
+repnet_in_channels = list(neck.num_channels) if hasattr(neck, "num_channels") else [embed_dim]*num_feature_levels
 
 transformer = SalienceTransformer(
     encoder=SalienceTransformerEncoder(
@@ -55,8 +65,8 @@ transformer = SalienceTransformer(
         num_layers=transformer_enc_layers,
     ),
     neck=RepVGGPluXNetwork(
-        in_channels_list=neck.num_channels,
-        out_channels_list=neck.num_channels,
+        in_channels_list=repnet_in_channels,
+        out_channels_list=[embed_dim]*num_feature_levels,  # out_channels_list长度和维度要和neck输出一致
         norm_layer=nn.BatchNorm2d,
         activation=nn.SiLU,
         groups=4,
@@ -78,23 +88,21 @@ transformer = SalienceTransformer(
     num_feature_levels=num_feature_levels,
     two_stage_num_proposals=num_queries,
     level_filter_ratio=(0.4, 0.8, 1.0, 1.0),
-    layer_filter_ratio=(1.0, 0.8, 0.6, 0.6, 0.4, 0.2),
+    layer_filter_ratio=(1.0, 0.8, 0.6, 0.6, 0.4, 0.2)
 )
 
 matcher = HungarianMatcher(cost_class=2, cost_bbox=5, cost_giou=2)
 
-# 1. 创建MarineOpticalLoss实例
+# ===== Optical/Marine Loss =====
 from models.bricks.fpn2 import MarineOpticalLoss
 optical_loss_module = MarineOpticalLoss()
 
-# 2. 配置weight_dict（确保包含光学损失权重）
 weight_dict = {
     "loss_class": 1.0,
     "loss_bbox": 5.0,
     "loss_giou": 2.0,
-    "loss_optical": 0.1,  # 光学损失权重
+    "loss_optical": 0.1,  # Optical loss
 }
-
 weight_dict.update({"loss_class_dn": 1, "loss_bbox_dn": 5, "loss_giou_dn": 2})
 weight_dict.update({
     k + f"_{i}": v
@@ -104,10 +112,6 @@ weight_dict.update({
 weight_dict.update({"loss_class_enc": 1, "loss_bbox_enc": 5, "loss_giou_enc": 2})
 weight_dict.update({"loss_salience": 2})
 
-
-
-# criterion = HybridSetCriterion(num_classes, matcher=matcher, weight_dict=weight_dict, alpha=0.25, gamma=2.0)
-# 3. 创建SetCriterion
 criterion = SetCriterion(
     num_classes=num_classes,
     matcher=matcher,
@@ -117,14 +121,14 @@ criterion = SetCriterion(
     use_optical_loss=True,
     optical_loss_weight=0.1,
     optical_loss_module=optical_loss_module,
-    optical_loss_freq=2,  # 每2次迭代计算一次
-    progressive_weight=True,  # 使用渐进式权重
+    optical_loss_freq=2,
+    progressive_weight=True,
 )
 
 foreground_criterion = SalienceCriterion(noise_scale=0.0, alpha=0.25, gamma=2.0)
 postprocessor = PostProcess(select_box_nums_for_evaluation=300)
 
-# combine above components to instantiate the model
+# ========== 模型组装 ==========
 model = SalienceDETR(
     backbone=backbone,
     neck=neck,
