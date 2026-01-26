@@ -20,19 +20,18 @@ from models.necks.repnet import RepVGGPluXNetwork
 embed_dim = 256
 num_classes = 91
 num_queries = 900
-num_feature_levels = 4
-transformer_enc_layers = 6
-transformer_dec_layers = 6
+num_feature_levels = 8
+transformer_enc_layers = 8
+transformer_dec_layers = 8
 num_heads = 8
 dim_feedforward = 2048
 
 # instantiate model components
-position_embedding = PositionEmbeddingSine(embed_dim // 2, temperature=10000, normalize=True, offset=-0.5)
+position_embedding = PositionEmbeddingSine(embed_dim // 2, temperature=20000, normalize=True, offset=-0.5)
 
 backbone = SwinTransformerBackbone("swin_l", return_indices=(1, 2, 3), freeze_indices=(0,))
 
 neck = ChannelMapper(
-    # in_channels=backbone.num_channels,
     in_channels=[embed_dim,embed_dim,embed_dim],
     out_channels=embed_dim,
     num_outs=num_feature_levels,

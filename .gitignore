@@ -163,3 +163,10 @@ cython_debug/
 data/
 checkpoints/
 visualization/
+logs/
+prediction_result/
+visualize_dataset/
+/test_seadronesee.sh
+/training_ap.png
+/training_loss.jpg
+/training_loss_and_ap.png

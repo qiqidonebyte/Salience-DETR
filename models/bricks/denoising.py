@@ -1,3 +1,5 @@
+import random
+
 import torch
 from torch import nn
 from torchvision.ops import boxes as box_ops
@@ -7,14 +9,14 @@ from util.misc import inverse_sigmoid
 
 class GenerateDNQueries(nn.Module):
     def __init__(
-        self,
-        num_queries: int = 300,
-        num_classes: int = 80,
-        label_embed_dim: int = 256,
-        denoising_groups: int = 5,
-        label_noise_prob: float = 0.2,
-        box_noise_scale: float = 0.4,
-        with_indicator: bool = False,
+            self,
+            num_queries: int = 300,
+            num_classes: int = 80,
+            label_embed_dim: int = 256,
+            denoising_groups: int = 5,
+            label_noise_prob: float = 0.2,
+            box_noise_scale: float = 0.4,
+            with_indicator: bool = False,
     ):
         """Generate denoising queries for DN-DETR
 
@@ -74,6 +76,32 @@ class GenerateDNQueries(nn.Module):
             attn_mask[start_row:end_row, :start_col] = True
             attn_mask[start_row:end_row, end_col:noised_query_nums] = True
         return attn_mask
+
+    def generate_local_attention_mask(self, gt_boxes, device):
+        num_queries = len(gt_boxes)
+        tgt_size = num_queries + self.num_queries
+        attn_mask = torch.zeros(tgt_size, tgt_size, device=device, dtype=torch.bool)
+
+        # Fill the diagonal with ones to ensure each query attends to itself
+        torch.fill_diagonal(attn_mask, 1)
+
+        # Calculate local window size for each query based on the target size
+        for i, box in enumerate(gt_boxes):
+            window_size = self.calculate_local_window_size(box[2:])  # Use width and height to calculate window size
+            start_idx = max(i - window_size // 2, 0)
+            end_idx = min(i + window_size // 2 + 1, tgt_size)
+
+            # Apply the local attention mask
+            attn_mask[i, start_idx:end_idx] = 1
+
+        return attn_mask
+
+    @staticmethod
+    def calculate_local_window_size(target_size):
+        base_window_size = 32  # Set a base window size
+        size_factor = min(target_size) / 32  # Normalize the size factor
+        window_size = int(base_window_size * (1 + size_factor))  # Adjust window size based on target size
+        return max(96, window_size)  # Ensure the window size is not smaller than a minimum value
 
     def forward(self, gt_labels_list, gt_boxes_list):
         """
@@ -177,13 +205,13 @@ class GenerateDNQueries(nn.Module):
 
 class GenerateCDNQueries(GenerateDNQueries):
     def __init__(
-        self,
-        num_queries: int = 300,
-        num_classes: int = 80,
-        label_embed_dim: int = 256,
-        denoising_nums: int = 100,
-        label_noise_prob: float = 0.5,
-        box_noise_scale: float = 1.0,
+            self,
+            num_queries: int = 300,
+            num_classes: int = 80,
+            label_embed_dim: int = 256,
+            denoising_nums: int = 100,
+            label_noise_prob: float = 0.5,
+            box_noise_scale: float = 1.0,
     ):
         super().__init__(
             num_queries=num_queries,
@@ -203,13 +231,13 @@ class GenerateCDNQueries(GenerateDNQueries):
         :param boxes: Bounding boxes in format ``(x_c, y_c, w, h)`` with shape ``(num_boxes, 4)``
         :param box_noise_scale: Scaling factor for box noising, defaults to 0.4
         :return: Noised boxes
-        """        
+        """
         num_boxes = len(boxes) // self.denoising_groups // 2
         positive_idx = torch.arange(num_boxes, dtype=torch.long, device=boxes.device)
         positive_idx = positive_idx.unsqueeze(0).repeat(self.denoising_groups, 1)
         positive_idx += (
-            torch.arange(self.denoising_groups, dtype=torch.long, device=boxes.device).unsqueeze(1) *
-            num_boxes * 2
+                torch.arange(self.denoising_groups, dtype=torch.long, device=boxes.device).unsqueeze(1) *
+                num_boxes * 2
         )
         positive_idx = positive_idx.flatten()
         negative_idx = positive_idx + num_boxes
@@ -222,11 +250,36 @@ class GenerateCDNQueries(GenerateDNQueries):
             rand_part[negative_idx] += 1.0
             rand_part *= rand_sign
             xyxy_boxes = box_ops._box_cxcywh_to_xyxy(boxes)
+            # todo: 小目标优化，如果bbox面积属于小面积，则box_noise_scale减小
             xyxy_boxes += torch.mul(rand_part, diff) * box_noise_scale
             xyxy_boxes = xyxy_boxes.clamp(min=0.0, max=1.0)
             boxes = box_ops._box_xyxy_to_cxcywh(xyxy_boxes)
 
         return boxes
+
+    def is_small_target(self, box, area_threshold=20):
+        return box['area'] < area_threshold
+
+    def add_noise_to_boxes(self, boxes, noise_scale):
+        noised_boxes = []
+        for box in boxes:
+            x, y, w, h = box[:4]
+            noise_x = random.uniform(-noise_scale, noise_scale) * w
+            noise_y = random.uniform(-noise_scale, noise_scale) * h
+            noise_w = random.uniform(-noise_scale, noise_scale) * w
+            noise_h = random.uniform(-noise_scale, noise_scale) * h
+
+            # 对小目标使用更小的噪声尺度
+            if self.is_small_target(box):
+                noise_scale_small = noise_scale * 0.5
+                noise_x *= noise_scale_small
+                noise_y *= noise_scale_small
+                noise_w *= noise_scale_small
+                noise_h *= noise_scale_small
+
+            noised_box = [x + noise_x, y + noise_y, w + noise_w, h + noise_h]
+            noised_boxes.append(noised_box)
+        return noised_boxes
 
     def forward(self, gt_labels_list, gt_boxes_list):
         """_summary_
@@ -235,7 +288,7 @@ class GenerateCDNQueries(GenerateDNQueries):
             with normalized coordinates in format ``(x, y, w, h)`` in shape ``(num_gts, 4)``
         :param gt_boxes_list: Classification labels per image in shape ``(num_gt, )``
         :return: Noised label queries, box queries, attention mask and denoising metas.
-        """        
+        """
         # the number of ground truth per image in one batch
         # e.g. [tensor([0, 1]), tensor([2, 3, 4])] -> gt_nums_per_image: [2, 3]
         # means there are 2 instances in the first image and 3 instances in the second image
@@ -248,7 +301,7 @@ class GenerateCDNQueries(GenerateDNQueries):
         max_gt_num_per_image = max(gt_nums_per_image)
 
         # get denoising_groups, which is 1 for empty ground truth
-        denoising_groups = self.denoising_nums * max_gt_num_per_image // max(max_gt_num_per_image**2, 1)
+        denoising_groups = self.denoising_nums * max_gt_num_per_image // max(max_gt_num_per_image ** 2, 1)
         self.denoising_groups = max(denoising_groups, 1)
 
         # concat ground truth labels and boxes in one batch

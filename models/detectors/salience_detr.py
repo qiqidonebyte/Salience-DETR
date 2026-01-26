@@ -1,4 +1,4 @@
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Any
 
 import torch
 from torch import Tensor, nn
@@ -8,13 +8,14 @@ from torchvision.ops import boxes as box_ops
 from models.bricks.denoising import GenerateCDNQueries
 from models.bricks.losses import sigmoid_focal_loss
 from models.detectors.base_detector import DNDETRDetector
+from models.bricks.fpn2 import FPN
 
 
 class SalienceCriterion(nn.Module):
     def __init__(
         self,
         limit_range: Tuple = ((-1, 64), (64, 128), (128, 256), (256, 99999)),
-        noise_scale: float = 0.0, 
+        noise_scale: float = 0.0,
         alpha: float = 0.25,
         gamma: float = 2.0,
     ):
@@ -46,6 +47,13 @@ class SalienceCriterion(nn.Module):
         mask_targets = torch.cat(mask_targets, dim=1)
         foreground_mask = torch.cat([e.flatten(-2) for e in foreground_mask], -1)
         foreground_mask = foreground_mask.squeeze(1)
+
+        if True:
+            # 计算目标的显著性得分权重
+            size_weights = self.compute_size_weights(gt_boxes_list)
+            # 动态调整显著性得分
+            adjusted_foreground_mask = self.adjust_salience_scores(foreground_mask, size_weights)
+
         num_pos = torch.sum(mask_targets > 0.5 * self.noise_scale).clamp_(min=1)
         salience_loss = (
             sigmoid_focal_loss(
@@ -54,10 +62,41 @@ class SalienceCriterion(nn.Module):
                 num_pos,
                 alpha=self.alpha,
                 gamma=self.gamma,
-            ) * foreground_mask.shape[1]
+            ) * adjusted_foreground_mask.shape[1]
         )
         return {"loss_salience": salience_loss}
 
+    def compute_size_weights(self, gt_boxes_list, min_area_threshold=None):
+        # 计算每个目标的面积
+        areas = torch.cat([(box[:, 2] - box[:, 0]) * (box[:, 3] - box[:, 1]) for box in gt_boxes_list])
+        areas = areas.float()  # 确保面积是浮点数
+
+        # 动态确定小目标的面积阈值
+        # if min_area_threshold is None:
+        #     min_area_threshold = torch.quantile(areas, 0.1)  # 使用10%分位数作为阈值
+
+        # 对小目标赋予更高的权重，使用平方根或对数函数来平滑权重
+        # 使用平方根函数来减少小目标面积的影响
+        size_weights = torch.sqrt(1.0 / (areas + 1e-4))  # 避免除以零
+
+        # 确保权重不会过大
+        size_weights = torch.clamp(size_weights, 0.5, 2.0)
+
+        return size_weights
+    
+    def adjust_salience_scores(self, foreground_mask, size_weights):
+        # 将显著性得分转换为概率
+        salience_scores = torch.sigmoid(foreground_mask)  # 转换为概率
+
+        # 根据面积权重调整显著性得分
+        # 对于小目标，增加其显著性得分；对于大目标，保持显著性得分基本不变
+        adjusted_salience_scores = salience_scores * size_weights.unsqueeze(0).unsqueeze(-1).unsqueeze(-1)
+
+        # 确保调整后的显著性得分在合理范围内
+        adjusted_salience_scores = torch.clamp(adjusted_salience_scores, 0.01, 0.99)
+
+        return adjusted_salience_scores
+    
     def get_pixel_coordinate(self, feature_shape, stride, device):
         height, width = feature_shape
         coord_y, coord_x = torch.meshgrid(
@@ -130,7 +169,8 @@ class SalienceDETR(DNDETRDetector):
         focus_criterion: nn.Module,
         # model parameters
         num_classes: int = 91,
-        num_queries: int = 900,
+        # 默认900，增加到1500
+        num_queries: int = 1600,
         denoising_nums: int = 100,
         # model variants
         aux_loss: bool = True,
@@ -145,6 +185,10 @@ class SalienceDETR(DNDETRDetector):
 
         # define model structures
         self.backbone = backbone
+
+        # 初始化FPN模块
+        self.fpn = FPN(backbone.num_channels, embed_dim)
+
         self.neck = neck
         self.position_embedding = position_embedding
         self.transformer = transformer
@@ -167,6 +211,7 @@ class SalienceDETR(DNDETRDetector):
 
         # extract features
         multi_level_feats = self.backbone(images.tensors)
+        multi_level_feats = self.fpn(multi_level_feats)
         multi_level_feats = self.neck(multi_level_feats)
 
         multi_level_masks = []
