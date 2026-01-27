@@ -8,7 +8,7 @@ from torchvision.ops import boxes as box_ops
 from models.bricks.denoising import GenerateCDNQueries
 from models.bricks.losses import sigmoid_focal_loss
 from models.detectors.base_detector import DNDETRDetector
-from models.bricks.marine_enhanced_fpn import MarineEnhancedFPN
+from models.bricks.marine_enhanced_fpn2 import MarineEnhancedFPN
 
 
 class SalienceCriterion(nn.Module):
