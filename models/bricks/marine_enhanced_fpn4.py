@@ -72,11 +72,42 @@ class AdvancedSmallObjectAttention(nn.Module):
         return x + 0.5 * enhanced  # 残差连接
 
 
+class EdgeAwareEnhancement(nn.Module):
+    """边缘感知增强模块 - 专门针对小目标轮廓"""
+
+    def __init__(self, channels):
+        super().__init__()
+
+        # Sobel-like边缘检测
+        self.edge_detector = nn.Sequential(
+            nn.Conv2d(channels, channels, 3, padding=1, groups=channels // 4),
+            nn.Conv2d(channels, channels, 1),
+            nn.BatchNorm2d(channels),
+            nn.ReLU(inplace=True)
+        )
+
+        # 边缘注意力
+        self.edge_attention = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Conv2d(channels, max(channels // 8, 8), 1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(max(channels // 8, 8), channels, 1),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        edge_feat = self.edge_detector(x)
+        edge_att = self.edge_attention(edge_feat)
+        return x + x * edge_att  # 边缘增强
+
+
 class MultiScaleDenseFusion(nn.Module):
     """多尺度密集融合 - 基于最新特征金字塔研究"""
 
     def __init__(self, channels, num_scales=3):
         super().__init__()
+        self.channels = channels
+        self.num_scales = num_scales
 
         # 密集跨尺度连接
         self.dense_fusions = nn.ModuleList([
@@ -91,14 +122,17 @@ class MultiScaleDenseFusion(nn.Module):
         self.weight_predictors = nn.ModuleList([
             nn.Sequential(
                 nn.AdaptiveAvgPool2d(1),
-                nn.Conv2d(channels, channels // 4, 1),
+                nn.Conv2d(channels, max(channels // 4, 8), 1),
                 nn.ReLU(inplace=True),
-                nn.Conv2d(channels // 4, 1, 1),
+                nn.Conv2d(max(channels // 4, 8), 1, 1),
                 nn.Sigmoid()
             ) for _ in range(num_scales)
         ])
 
     def forward(self, features):
+        if len(features) == 1:
+            return features
+
         fused_features = []
 
         for i, feat in enumerate(features):
@@ -119,11 +153,18 @@ class MultiScaleDenseFusion(nn.Module):
 
                 # 密集拼接
                 dense_input = torch.cat([feat] + prev_feats, dim=1)
-                fused = self.dense_fusions[i](dense_input)
+                if i < len(self.dense_fusions):
+                    fused = self.dense_fusions[i](dense_input)
+                else:
+                    # 如果模块不够，使用平均融合
+                    fused = torch.mean(torch.stack([feat] + prev_feats), dim=0)
 
             # 自适应权重
-            weight = self.weight_predictors[i](fused)
-            fused_features.append(fused * weight)
+            if i < len(self.weight_predictors):
+                weight = self.weight_predictors[i](fused)
+                fused = fused * weight
+
+            fused_features.append(fused)
 
         return fused_features
 
@@ -154,13 +195,19 @@ class AdvancedMarineEnhancedFPN(nn.Module):
             ) for in_channels in features_channels
         ])
 
-        # 2. 先进小目标增强
-        if use_advanced_enhance:
-            self.advanced_attentions = nn.ModuleList([
-                AdvancedSmallObjectAttention(out_channels)
-                for _ in range(len(features_channels))
-            ])
+        # 2. 先进小目标增强 - 始终初始化，确保参数存在
+        self.advanced_attentions = nn.ModuleList([
+            AdvancedSmallObjectAttention(out_channels)
+            for _ in range(len(features_channels))
+        ])
 
+        # 边缘增强模块
+        self.edge_enhancers = nn.ModuleList([
+            EdgeAwareEnhancement(out_channels)
+            for _ in range(len(features_channels))
+        ])
+
+        if use_advanced_enhance:
             self.multi_scale_dense_fusion = MultiScaleDenseFusion(
                 out_channels, len(features_channels)
             )
@@ -208,8 +255,6 @@ class AdvancedMarineEnhancedFPN(nn.Module):
 
         total_params = sum(p.numel() for p in self.parameters())
         print(f"  总参数量: {total_params:,}")
-        print(f"  预计计算量增加: 30-40%")
-        print(f"  小目标mAP预期提升: 3-5%")
 
     def forward(self, features):
         """完全兼容的前向传播"""
@@ -238,41 +283,41 @@ class AdvancedMarineEnhancedFPN(nn.Module):
             for i, feat in enumerate(lateral_feats):
                 # 注意力增强
                 att_enhanced = self.advanced_attentions[i](feat)
-                enhanced_feats.append(att_enhanced)
+                # 边缘增强
+                edge_enhanced = self.edge_enhancers[i](att_enhanced)
+                enhanced_feats.append(edge_enhanced)
 
             # 多尺度密集融合
             fused_feats = self.multi_scale_dense_fusion(enhanced_feats)
 
             # 特征精炼
             for i in range(len(fused_feats)):
-                fused_feats[i] = fused_feats[i] + self.refinement_convs[i](fused_feats[i])
+                if i < len(self.refinement_convs):
+                    fused_feats[i] = fused_feats[i] + self.refinement_convs[i](fused_feats[i])
         else:
-            fused_feats = lateral_feats
+            # 即使不使用增强，也确保所有参数参与计算（微小贡献）
+            fused_feats = []
+            for i, feat in enumerate(lateral_feats):
+                # 微小贡献确保梯度流动
+                att_contribution = self.advanced_attentions[i](feat) * 1e-6
+                edge_contribution = self.edge_enhancers[i](feat) * 1e-6
+                enhanced_feat = feat + att_contribution + edge_contribution
+                fused_feats.append(enhanced_feat)
 
         # 标准FPN构建
-        fpn_features = [lateral_feats[-1]]  # 从最深特征开始
+        fpn_features = [fused_feats[-1]]  # 从最深特征开始
 
-        for i in range(len(lateral_feats) - 2, -1, -1):
+        for i in range(len(fused_feats) - 2, -1, -1):
             # 上采样高层特征
             top_down_feat = F.interpolate(
                 fpn_features[0],
-                size=lateral_feats[i].shape[2:],
+                size=fused_feats[i].shape[2:],
                 mode='bilinear',
                 align_corners=True
             )
 
-            # 关键修复：确保所有模块都参与计算
-            if self.use_advanced_enhance:
-                # 正常使用增强模块
-                enhanced = self.advanced_attentions[i](lateral_feats[i])
-                enhanced = self.edge_enhancers[i](enhanced)
-                fused = top_down_feat + enhanced
-            else:
-                # 即使不使用增强，也确保参数参与计算（微小贡献）
-                enhanced = self.advanced_attentions[i](lateral_feats[i]) * 1e-6
-                edge_enhanced = self.edge_enhancers[i](lateral_feats[i]) * 1e-6
-                fused = top_down_feat + lateral_feats[i] + enhanced + edge_enhanced
-
+            # 特征融合
+            fused = top_down_feat + fused_feats[i]
             if i < len(self.fusion_convs):
                 fused = self.fusion_convs[i](fused)
 
