@@ -250,17 +250,29 @@ class AdvancedMarineEnhancedFPN(nn.Module):
             fused_feats = lateral_feats
 
         # 标准FPN构建
-        fpn_features = [fused_feats[-1]]
+        fpn_features = [lateral_feats[-1]]  # 从最深特征开始
 
-        for i in range(len(fused_feats) - 2, -1, -1):
-            top_down = F.interpolate(
+        for i in range(len(lateral_feats) - 2, -1, -1):
+            # 上采样高层特征
+            top_down_feat = F.interpolate(
                 fpn_features[0],
-                size=fused_feats[i].shape[2:],
+                size=lateral_feats[i].shape[2:],
                 mode='bilinear',
                 align_corners=True
             )
 
-            fused = top_down + fused_feats[i]
+            # 关键修复：确保所有模块都参与计算
+            if self.use_advanced_enhance:
+                # 正常使用增强模块
+                enhanced = self.advanced_attentions[i](lateral_feats[i])
+                enhanced = self.edge_enhancers[i](enhanced)
+                fused = top_down_feat + enhanced
+            else:
+                # 即使不使用增强，也确保参数参与计算（微小贡献）
+                enhanced = self.advanced_attentions[i](lateral_feats[i]) * 1e-6
+                edge_enhanced = self.edge_enhancers[i](lateral_feats[i]) * 1e-6
+                fused = top_down_feat + lateral_feats[i] + enhanced + edge_enhanced
+
             if i < len(self.fusion_convs):
                 fused = self.fusion_convs[i](fused)
 
