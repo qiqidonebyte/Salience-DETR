@@ -8,7 +8,7 @@ from torchvision.ops import boxes as box_ops
 from models.bricks.denoising import GenerateCDNQueries
 from models.bricks.losses import sigmoid_focal_loss
 from models.detectors.base_detector import DNDETRDetector
-from models.bricks.marine_enhanced_fpn3 import MarineEnhancedFPN_v3
+from models.bricks.marine_enhanced_fpn4 import AdvancedMarineEnhancedFPN
 
 
 class SalienceCriterion(nn.Module):
@@ -187,10 +187,10 @@ class SalienceDETR(DNDETRDetector):
         self.backbone = backbone
 
         # 在您的模型初始化代码中
-        self.fpn = MarineEnhancedFPN_v3(
+        self.fpn = AdvancedMarineEnhancedFPN(
             features_channels=[512, 1024, 2048],  # 根据实际backbone输出调整
             out_channels=256,
-            use_marine_enhance=False  # 建议开启小目标增强
+            use_marine_enhance=True  # 建议开启小目标增强
         )
         # self.fpn = FPN(backbone.num_channels, embed_dim)
 
