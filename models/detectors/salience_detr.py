@@ -190,7 +190,7 @@ class SalienceDETR(DNDETRDetector):
         self.fpn = AdvancedMarineEnhancedFPN(
             features_channels=[512, 1024, 2048],
             out_channels=256,
-            use_advanced_enhance=True  # 正确的参数名
+            use_advanced_enhance=False  # 正确的参数名
         )
         # self.fpn = FPN(backbone.num_channels, embed_dim)
 
