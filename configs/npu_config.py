@@ -18,7 +18,7 @@ if NPU_ENABLED:
 
 # ============ 常用训练配置 ============
 num_epochs = 24
-batch_size = 4 * max(1, NPU_COUNT)  # 根据NPU数量调整batch_size
+batch_size = 4   # 根据NPU数量调整batch_size
 num_workers = 8 if NPU_ENABLED else 16  # NPU建议减少workers
 pin_memory = False if NPU_ENABLED else True  # NPU对pin_memory支持有限
 print_freq = 50
