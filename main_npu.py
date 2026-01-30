@@ -27,7 +27,6 @@ except ImportError:
 
 try:
     from apex import amp
-    from apex.optimizers import FusedAdam, FusedSGD
 
     APEX_AVAILABLE = True
 except ImportError:
@@ -37,6 +36,7 @@ except ImportError:
 from torch.utils import data
 from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.distributed as dist
+from torch.optim import AdamW
 
 from util.collate_fn import collate_fn
 from util.engine import evaluate_acc, train_one_epoch_acc
@@ -61,8 +61,8 @@ def parse_args():
     parser.add_argument("--npu", action="store_true", default=True, help="使用NPU训练")
     parser.add_argument("--npu-ids", type=str, default=None, help="NPU设备ID，如'0,1,2,3'")
     parser.add_argument("--mixed-precision", type=str, default="bf16", choices=["no", "fp16", "bf16"])
-    parser.add_argument("--use-apex", action="store_true", default=True, help="使用Apex优化")
-    parser.add_argument("--opt-level", type=str, default="O2", choices=["O0", "O1", "O2", "O3"])
+    parser.add_argument("--use-apex", action="store_true", default=False, help="使用Apex优化")  # NPU默认关闭
+    parser.add_argument("--opt-level", type=str, default="O1", choices=["O0", "O1", "O2", "O3"])
     parser.add_argument("--gradient-accumulation", type=int, default=1, help="梯度累积步数")
 
     # 分布式训练参数
@@ -162,21 +162,15 @@ def create_output_dir(cfg, args):
 
 def setup_optimizer(model, cfg, args):
     """设置优化器"""
-    if args.npu and APEX_AVAILABLE and args.use_apex:
-        # 使用Apex的FusedAdam
-        param_dicts = cfg.param_dicts(model)
-        optimizer = FusedAdam(
-            param_dicts,
-            lr=args.lr or cfg.learning_rate,
-            weight_decay=1e-4,
-            betas=(0.9, 0.999)
-        )
-    else:
-        # 使用标准优化器
-        optimizer = cfg.optimizer(cfg.param_dicts(model))
-        if args.lr:
-            for param_group in optimizer.param_groups:
-                param_group['lr'] = args.lr
+    param_dicts = cfg.param_dicts(model)
+
+    # NPU环境下使用标准AdamW，不使用FusedAdam
+    optimizer = AdamW(
+        param_dicts,
+        lr=args.lr or cfg.learning_rate,
+        weight_decay=1e-4,
+        betas=(0.9, 0.999)
+    )
 
     return optimizer
 
@@ -186,15 +180,8 @@ def setup_model_for_npu(model, args, cfg):
     # 将模型移到NPU
     model = model.to(args.device)
 
-    # 如果使用Apex混合精度
-    if args.npu and APEX_AVAILABLE and args.mixed_precision != "no":
-        model, optimizer = amp.initialize(
-            model,
-            None,  # 优化器稍后传入
-            opt_level=args.opt_level,
-            loss_scale="dynamic" if args.opt_level == "O2" else None,
-            verbosity=0
-        )
+    # 注意：NPU环境下不启用Apex
+    # 如果需要混合精度，使用torch.cuda.amp替代
 
     # 分布式训练
     if args.distributed:
@@ -324,12 +311,6 @@ def train():
 
     # 为NPU设置模型
     model = setup_model_for_npu(model, args, cfg)
-
-    # 重新为Apex初始化优化器
-    if args.npu and APEX_AVAILABLE and args.mixed_precision != "no":
-        model, optimizer = amp.initialize(
-            model, optimizer, opt_level=args.opt_level
-        )
 
     # 加载检查点
     start_epoch = 0
@@ -482,7 +463,8 @@ def train_one_epoch(model, optimizer, data_loader, epoch, args, cfg, logger):
         targets = [{k: v.to(args.device, non_blocking=True) for k, v in t.items()} for t in targets]
 
         # 前向传播
-        with torch.cuda.amp.autocast(enabled=args.mixed_precision != "no"):
+        with torch.cuda.amp.autocast(enabled=args.mixed_precision != "no" and not args.npu):
+            # 注意：NPU使用自己的混合精度机制
             loss_dict = model(images, targets)
 
         # 计算总损失
@@ -490,12 +472,7 @@ def train_one_epoch(model, optimizer, data_loader, epoch, args, cfg, logger):
 
         # 反向传播
         optimizer.zero_grad()
-
-        if args.npu and APEX_AVAILABLE and args.mixed_precision != "no":
-            with amp.scale_loss(losses, optimizer) as scaled_loss:
-                scaled_loss.backward()
-        else:
-            losses.backward()
+        losses.backward()
 
         # 梯度裁剪
         if cfg.max_norm > 0:
