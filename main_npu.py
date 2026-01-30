@@ -61,7 +61,7 @@ def parse_args():
     parser.add_argument("--npu", action="store_true", default=True, help="使用NPU训练")
     parser.add_argument("--npu-ids", type=str, default=None, help="NPU设备ID，如'0,1,2,3'")
     parser.add_argument("--mixed-precision", type=str, default="bf16", choices=["no", "fp16", "bf16"])
-    parser.add_argument("--use-apex", action="store_true", default=False, help="使用Apex优化")  # NPU默认关闭
+    parser.add_argument("--use-apex", action="store_true", default=False, help="使用Apex优化")
     parser.add_argument("--opt-level", type=str, default="O1", choices=["O0", "O1", "O2", "O3"])
     parser.add_argument("--gradient-accumulation", type=int, default=1, help="梯度累积步数")
 
@@ -164,7 +164,7 @@ def setup_optimizer(model, cfg, args):
     """设置优化器"""
     param_dicts = cfg.param_dicts(model)
 
-    # NPU环境下使用标准AdamW，不使用FusedAdam
+    # NPU环境下使用标准AdamW
     optimizer = AdamW(
         param_dicts,
         lr=args.lr or cfg.learning_rate,
@@ -180,9 +180,6 @@ def setup_model_for_npu(model, args, cfg):
     # 将模型移到NPU
     model = model.to(args.device)
 
-    # 注意：NPU环境下不启用Apex
-    # 如果需要混合精度，使用torch.cuda.amp替代
-
     # 分布式训练
     if args.distributed:
         model = DDP(
@@ -194,6 +191,18 @@ def setup_model_for_npu(model, args, cfg):
         )
 
     return model
+
+
+def move_to_device(data, device):
+    """将数据移到指定设备，只移动张量类型"""
+    if isinstance(data, torch.Tensor):
+        return data.to(device, non_blocking=True)
+    elif isinstance(data, dict):
+        return {k: move_to_device(v, device) for k, v in data.items()}
+    elif isinstance(data, list):
+        return [move_to_device(item, device) for item in data]
+    else:
+        return data
 
 
 def save_npu_checkpoint(state, filename, args):
@@ -460,7 +469,15 @@ def train_one_epoch(model, optimizer, data_loader, epoch, args, cfg, logger):
     for batch_idx, (images, targets) in enumerate(data_loader):
         # 将数据移到NPU
         images = [img.to(args.device, non_blocking=True) for img in images]
-        targets = [{k: v.to(args.device, non_blocking=True) for k, v in t.items()} for t in targets]
+
+        # 修复：只对张量类型的值进行设备转移
+        targets = [
+            {
+                k: v.to(args.device, non_blocking=True) if isinstance(v, torch.Tensor) else v
+                for k, v in t.items()
+            }
+            for t in targets
+        ]
 
         # 前向传播
         with torch.cuda.amp.autocast(enabled=args.mixed_precision != "no" and not args.npu):
