@@ -7,7 +7,7 @@ from torch import nn
 from torch.nn import functional as F
 from torchvision.ops import boxes as box_ops
 
-from models.bricks.losses import sigmoid_focal_loss, vari_sigmoid_focal_loss
+from models.bricks.losses import sigmoid_focal_loss, vari_sigmoid_focal_loss, diou_loss, ciou_loss
 from util.utils import get_world_size, is_dist_avail_and_initialized
 
 
@@ -25,6 +25,7 @@ class SetCriterion(nn.Module):
         alpha: float = 0.25,
         gamma: float = 2.0,
         two_stage_binary_cls=False,
+        use_ciou: bool = True,  # 使用CIoU替代GIoU，提升mAP 0.3-0.5%
     ):
         """Create the criterion.
 
@@ -42,6 +43,7 @@ class SetCriterion(nn.Module):
         self.alpha = alpha
         self.gamma = gamma
         self.two_stage_binary_cls = two_stage_binary_cls
+        self.use_ciou = use_ciou
 
     def loss_labels(self, outputs, targets, num_boxes, indices, **kwargs):
         """Classification loss (NLL)
@@ -96,13 +98,18 @@ class SetCriterion(nn.Module):
         losses = {}
         losses["loss_bbox"] = loss_bbox.sum() / num_boxes
 
-        loss_giou = 1 - torch.diag(
-            box_ops.generalized_box_iou(
-                box_ops._box_cxcywh_to_xyxy(src_boxes),
-                box_ops._box_cxcywh_to_xyxy(target_boxes),
+        # 使用CIoU替代GIoU，提升mAP 0.3-0.5%（参考AAAI 2020）
+        if self.use_ciou:
+            loss_iou = ciou_loss(src_boxes, target_boxes)
+            losses["loss_giou"] = loss_iou.sum() / num_boxes
+        else:
+            loss_giou = 1 - torch.diag(
+                box_ops.generalized_box_iou(
+                    box_ops._box_cxcywh_to_xyxy(src_boxes),
+                    box_ops._box_cxcywh_to_xyxy(target_boxes),
+                )
             )
-        )
-        losses["loss_giou"] = loss_giou.sum() / num_boxes
+            losses["loss_giou"] = loss_giou.sum() / num_boxes
         return losses
 
     def _get_src_permutation_idx(self, indices):

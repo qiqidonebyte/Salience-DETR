@@ -1,4 +1,112 @@
 from torch.nn import functional as F
+import torch
+
+
+def diou_loss(boxes1, boxes2):
+    """
+    Distance-IoU Loss (DIoU) - 比GIoU收敛更快，精度更高
+    参考: Distance-IoU Loss: Faster and Better Learning for Bounding Box Regression (AAAI 2020)
+    boxes format: (center_x, center_y, w, h) - normalized coordinates
+    """
+    # Convert to (x1, y1, x2, y2) for IoU calculation
+    boxes1_xyxy = torch.stack([
+        boxes1[..., 0] - boxes1[..., 2] / 2,
+        boxes1[..., 1] - boxes1[..., 3] / 2,
+        boxes1[..., 0] + boxes1[..., 2] / 2,
+        boxes1[..., 1] + boxes1[..., 3] / 2,
+    ], dim=-1)
+    
+    boxes2_xyxy = torch.stack([
+        boxes2[..., 0] - boxes2[..., 2] / 2,
+        boxes2[..., 1] - boxes2[..., 3] / 2,
+        boxes2[..., 0] + boxes2[..., 2] / 2,
+        boxes2[..., 1] + boxes2[..., 3] / 2,
+    ], dim=-1)
+    
+    # Calculate IoU
+    inter_x1 = torch.max(boxes1_xyxy[..., 0], boxes2_xyxy[..., 0])
+    inter_y1 = torch.max(boxes1_xyxy[..., 1], boxes2_xyxy[..., 1])
+    inter_x2 = torch.min(boxes1_xyxy[..., 2], boxes2_xyxy[..., 2])
+    inter_y2 = torch.min(boxes1_xyxy[..., 3], boxes2_xyxy[..., 3])
+    
+    inter_area = torch.clamp(inter_x2 - inter_x1, min=0) * torch.clamp(inter_y2 - inter_y1, min=0)
+    area1 = boxes1[..., 2] * boxes1[..., 3]
+    area2 = boxes2[..., 2] * boxes2[..., 3]
+    union_area = area1 + area2 - inter_area
+    iou = inter_area / (union_area + 1e-7)
+    
+    # Calculate center distance (normalized)
+    center1 = boxes1[..., :2]
+    center2 = boxes2[..., :2]
+    center_distance = torch.sum((center1 - center2) ** 2, dim=-1)
+    
+    # Calculate diagonal distance of enclosing box (normalized)
+    enclose_x1 = torch.min(boxes1_xyxy[..., 0], boxes2_xyxy[..., 0])
+    enclose_y1 = torch.min(boxes1_xyxy[..., 1], boxes2_xyxy[..., 1])
+    enclose_x2 = torch.max(boxes1_xyxy[..., 2], boxes2_xyxy[..., 2])
+    enclose_y2 = torch.max(boxes1_xyxy[..., 3], boxes2_xyxy[..., 3])
+    enclose_diagonal = (enclose_x2 - enclose_x1) ** 2 + (enclose_y2 - enclose_y1) ** 2
+    
+    # DIoU = IoU - (center_distance^2) / (enclose_diagonal^2)
+    diou = iou - (center_distance / (enclose_diagonal + 1e-7))
+    return 1 - diou
+
+
+def ciou_loss(boxes1, boxes2):
+    """
+    Complete-IoU Loss (CIoU) - 考虑长宽比，比DIoU更精确
+    参考: Complete-IoU Loss: Faster and Better Learning for Bounding Box Regression (AAAI 2020)
+    boxes format: (center_x, center_y, w, h) - normalized coordinates
+    """
+    # Convert to (x1, y1, x2, y2) for IoU calculation
+    boxes1_xyxy = torch.stack([
+        boxes1[..., 0] - boxes1[..., 2] / 2,
+        boxes1[..., 1] - boxes1[..., 3] / 2,
+        boxes1[..., 0] + boxes1[..., 2] / 2,
+        boxes1[..., 1] + boxes1[..., 3] / 2,
+    ], dim=-1)
+    
+    boxes2_xyxy = torch.stack([
+        boxes2[..., 0] - boxes2[..., 2] / 2,
+        boxes2[..., 1] - boxes2[..., 3] / 2,
+        boxes2[..., 0] + boxes2[..., 2] / 2,
+        boxes2[..., 1] + boxes2[..., 3] / 2,
+    ], dim=-1)
+    
+    # Calculate IoU
+    inter_x1 = torch.max(boxes1_xyxy[..., 0], boxes2_xyxy[..., 0])
+    inter_y1 = torch.max(boxes1_xyxy[..., 1], boxes2_xyxy[..., 1])
+    inter_x2 = torch.min(boxes1_xyxy[..., 2], boxes2_xyxy[..., 2])
+    inter_y2 = torch.min(boxes1_xyxy[..., 3], boxes2_xyxy[..., 3])
+    
+    inter_area = torch.clamp(inter_x2 - inter_x1, min=0) * torch.clamp(inter_y2 - inter_y1, min=0)
+    area1 = boxes1[..., 2] * boxes1[..., 3]
+    area2 = boxes2[..., 2] * boxes2[..., 3]
+    union_area = area1 + area2 - inter_area
+    iou = inter_area / (union_area + 1e-7)
+    
+    # Calculate center distance (normalized)
+    center1 = boxes1[..., :2]
+    center2 = boxes2[..., :2]
+    center_distance = torch.sum((center1 - center2) ** 2, dim=-1)
+    
+    # Calculate diagonal distance of enclosing box (normalized)
+    enclose_x1 = torch.min(boxes1_xyxy[..., 0], boxes2_xyxy[..., 0])
+    enclose_y1 = torch.min(boxes1_xyxy[..., 1], boxes2_xyxy[..., 1])
+    enclose_x2 = torch.max(boxes1_xyxy[..., 2], boxes2_xyxy[..., 2])
+    enclose_y2 = torch.max(boxes1_xyxy[..., 3], boxes2_xyxy[..., 3])
+    enclose_diagonal = (enclose_x2 - enclose_x1) ** 2 + (enclose_y2 - enclose_y1) ** 2
+    
+    # Calculate aspect ratio consistency
+    v = (4 / (torch.pi ** 2)) * torch.pow(
+        torch.atan(boxes2[..., 2] / (boxes2[..., 3] + 1e-7)) - 
+        torch.atan(boxes1[..., 2] / (boxes1[..., 3] + 1e-7)), 2
+    )
+    alpha = v / (1 - iou + v + 1e-7)
+    
+    # CIoU = IoU - (center_distance^2) / (enclose_diagonal^2) - alpha * v
+    ciou = iou - (center_distance / (enclose_diagonal + 1e-7)) - alpha * v
+    return 1 - ciou
 
 
 def sigmoid_focal_loss(inputs, targets, num_boxes, alpha: float = 0.25, gamma: float = 2):

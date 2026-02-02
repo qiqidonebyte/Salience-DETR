@@ -95,7 +95,7 @@ weight_dict.update({
 weight_dict.update({"loss_class_enc": 1, "loss_bbox_enc": 5, "loss_giou_enc": 2})
 weight_dict.update({"loss_salience": 2})
 
-criterion = HybridSetCriterion(num_classes, matcher=matcher, weight_dict=weight_dict, alpha=0.25, gamma=2.0)
+criterion = HybridSetCriterion(num_classes, matcher=matcher, weight_dict=weight_dict, alpha=0.25, gamma=2.0, use_ciou=True)
 foreground_criterion = SalienceCriterion(noise_scale=0.0, alpha=0.25, gamma=2.0)
 postprocessor = PostProcess(select_box_nums_for_evaluation=300)
 
